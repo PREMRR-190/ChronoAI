@@ -1,0 +1,59 @@
+# =========================
+# Dependency directories
+# =========================
+node_modules/
+dist/
+dist-ssr/
+build/
+.coverage/
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Packages
+# =========================
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# =========================
+# Logs and databases
+# =========================
+*.log
+*.sql
+*.sqlite
+
+# =========================
+# OS / Editor folders
+# =========================
+.DS_Store
+Thumbs.db
+.env
+.idea
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# =========================
+# Miscellaneous
+# =========================
+chronoai-backend.zip
