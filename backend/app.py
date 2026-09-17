@@ -13,33 +13,88 @@ import os
 
 app = Flask(__name__)
 
+# Render environment variable
 app.config["SECRET_KEY"] = os.environ.get(
-    "CHRONOAI_SECRET_KEY",
-    "chronoai-secret-key"
+    "SECRET_KEY",
+    os.environ.get(
+        "CHRONOAI_SECRET_KEY",
+        "dev-secret-change-me"
+    )
+)
+
+# =========================================================
+# PRODUCTION SESSION CONFIGURATION
+# =========================================================
+
+PRODUCTION = (
+    os.environ.get("PRODUCTION", "false").lower() == "true"
 )
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = False
+app.config["SESSION_COOKIE_SECURE"] = PRODUCTION
+
+if PRODUCTION:
+    app.config["SESSION_COOKIE_SAMESITE"] = "None"
+else:
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+
+# =========================================================
+# CORS
+# =========================================================
+
+FRONTEND_URL = os.environ.get(
+    "FRONTEND_URL",
+    "http://localhost:5173"
+)
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    FRONTEND_URL,
+    "https://chronoai-orcin.vercel.app"
+]
+
+# Remove duplicates
+allowed_origins = list(set(allowed_origins))
 
 
 CORS(
     app,
     supports_credentials=True,
-    origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ]
+    origins=allowed_origins
 )
 
 
 # =========================================================
-# MONGODB
+# MONGODB ATLAS
 # =========================================================
 
-MONGO_URI = "mongodb://127.0.0.1:27017/"
+MONGO_URI = os.environ.get("MONGO_URI")
 
-client = MongoClient(MONGO_URI)
+if not MONGO_URI:
+    print("WARNING: MONGO_URI environment variable is not set.")
+
+    # Local development fallback
+    MONGO_URI = "mongodb://127.0.0.1:27017/"
+
+
+try:
+
+    client = MongoClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=10000
+    )
+
+    # Test MongoDB connection
+    client.admin.command("ping")
+
+    print("MongoDB connection successful")
+
+except Exception as e:
+
+    print("MongoDB connection error:", e)
+
 
 db = client["ChronoAI"]
 
@@ -61,13 +116,17 @@ def get_logged_user():
         return None
 
     try:
+
         user = users_collection.find_one({
             "_id": ObjectId(user_id)
         })
 
         return user
 
-    except Exception:
+    except Exception as e:
+
+        print("GET LOGGED USER ERROR:", e)
+
         return None
 
 
@@ -82,7 +141,7 @@ def require_login():
 
 
 # =========================================================
-# HOME
+# HOME / HEALTH CHECK
 # =========================================================
 
 @app.route("/")
@@ -107,6 +166,7 @@ def register():
         data = request.get_json()
 
         if not data:
+
             return jsonify({
                 "success": False,
                 "message": "No data received"
@@ -156,7 +216,9 @@ def register():
             }), 400
 
 
-        # Check if username already exists
+        # =================================================
+        # CHECK EXISTING USER
+        # =================================================
 
         existing_user = users_collection.find_one({
             "username": username
@@ -171,12 +233,18 @@ def register():
             }), 409
 
 
-        # Create password hash
+        # =================================================
+        # HASH PASSWORD
+        # =================================================
 
         password_hash = generate_password_hash(
             password
         )
 
+
+        # =================================================
+        # CREATE USER
+        # =================================================
 
         new_user = {
 
@@ -184,7 +252,7 @@ def register():
 
             "password": password_hash,
 
-            "created_at": datetime.now()
+            "created_at": datetime.utcnow()
 
         }
 
@@ -194,7 +262,9 @@ def register():
         )
 
 
-        # Automatically login after registration
+        # =================================================
+        # LOGIN USER AUTOMATICALLY
+        # =================================================
 
         session.clear()
 
@@ -203,6 +273,14 @@ def register():
         )
 
         session["username"] = username
+
+
+        print(
+            "REGISTER:",
+            username,
+            "USER ID:",
+            str(result.inserted_id)
+        )
 
 
         return jsonify({
@@ -233,7 +311,8 @@ def register():
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                "Registration failed: " + str(e)
 
         }), 500
 
@@ -282,7 +361,9 @@ def login():
             }), 400
 
 
-        # Find user
+        # =================================================
+        # FIND USER IN MONGODB
+        # =================================================
 
         user = users_collection.find_one({
 
@@ -293,6 +374,11 @@ def login():
 
         if not user:
 
+            print(
+                "LOGIN FAILED - USER NOT FOUND:",
+                username
+            )
+
             return jsonify({
 
                 "success": False,
@@ -303,15 +389,25 @@ def login():
             }), 401
 
 
-        # Check password
+        # =================================================
+        # CHECK PASSWORD
+        # =================================================
+
+        stored_password = user.get(
+            "password",
+            ""
+        )
+
 
         if not check_password_hash(
-
-            user.get("password", ""),
-
+            stored_password,
             password
-
         ):
+
+            print(
+                "LOGIN FAILED - WRONG PASSWORD:",
+                username
+            )
 
             return jsonify({
 
@@ -323,8 +419,9 @@ def login():
             }), 401
 
 
-        # IMPORTANT
-        # Clear previous session completely
+        # =================================================
+        # CREATE SESSION
+        # =================================================
 
         session.clear()
 
@@ -336,7 +433,7 @@ def login():
 
 
         print(
-            "LOGIN:",
+            "LOGIN SUCCESS:",
             user["username"],
             "USER ID:",
             str(user["_id"])
@@ -371,7 +468,8 @@ def login():
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                "Login failed: " + str(e)
 
         }), 500
 
@@ -450,6 +548,7 @@ def logout():
 
     session.clear()
 
+
     return jsonify({
 
         "success": True,
@@ -461,7 +560,39 @@ def logout():
 
 
 # =========================================================
-# TASKS
+# TEST AUTHENTICATION
+# =========================================================
+
+@app.route("/api/test-auth", methods=["GET"])
+def test_auth():
+
+    user_id = session.get(
+        "user_id"
+    )
+
+    username = session.get(
+        "username"
+    )
+
+
+    return jsonify({
+
+        "success": True,
+
+        "logged_in":
+            bool(user_id),
+
+        "user_id":
+            user_id,
+
+        "username":
+            username
+
+    })
+
+
+# =========================================================
+# TASKS - ADD
 # =========================================================
 
 @app.route("/api/tasks", methods=["POST"])
@@ -483,7 +614,8 @@ def add_task():
             }), 401
 
 
-        data = request.get_json()
+        data = request.get_json() or {}
+
 
         title = str(
             data.get("title", "")
@@ -514,9 +646,6 @@ def add_task():
 
         task = {
 
-            # IMPORTANT
-            # Every task gets the current user's ID
-
             "user_id":
                 user_id,
 
@@ -533,7 +662,7 @@ def add_task():
                 False,
 
             "created_at":
-                datetime.now()
+                datetime.utcnow()
 
         }
 
@@ -583,8 +712,7 @@ def add_task():
 
 
 # =========================================================
-# GET TASKS
-# ONLY CURRENT USER
+# TASKS - GET
 # =========================================================
 
 @app.route("/api/tasks", methods=["GET"])
@@ -684,13 +812,10 @@ def get_tasks():
 
 
 # =========================================================
-# UPDATE TASK
+# TASKS - UPDATE
 # =========================================================
 
-@app.route(
-    "/api/tasks/<task_id>",
-    methods=["PUT"]
-)
+@app.route("/api/tasks/<task_id>", methods=["PUT"])
 def update_task(task_id):
 
     try:
@@ -709,15 +834,14 @@ def update_task(task_id):
             }), 401
 
 
-        data = request.get_json()
+        data = request.get_json() or {}
+
 
         completed = bool(
-
             data.get(
                 "completed",
                 False
             )
-
         )
 
 
@@ -783,13 +907,10 @@ def update_task(task_id):
 
 
 # =========================================================
-# DELETE TASK
+# TASKS - DELETE
 # =========================================================
 
-@app.route(
-    "/api/tasks/<task_id>",
-    methods=["DELETE"]
-)
+@app.route("/api/tasks/<task_id>", methods=["DELETE"])
 def delete_task(task_id):
 
     try:
@@ -855,13 +976,10 @@ def delete_task(task_id):
 
 
 # =========================================================
-# SCHEDULE
+# SCHEDULE - ADD
 # =========================================================
 
-@app.route(
-    "/api/schedule",
-    methods=["POST"]
-)
+@app.route("/api/schedule", methods=["POST"])
 def add_schedule():
 
     try:
@@ -880,17 +998,16 @@ def add_schedule():
             }), 401
 
 
-        data = request.get_json()
+        data = request.get_json() or {}
+
 
         time = data.get("time")
 
         activity = str(
-
             data.get(
                 "activity",
                 ""
             )
-
         ).strip()
 
 
@@ -908,9 +1025,6 @@ def add_schedule():
 
         schedule = {
 
-            # IMPORTANT
-            # Schedule belongs to current user
-
             "user_id":
                 user_id,
 
@@ -921,7 +1035,7 @@ def add_schedule():
                 activity,
 
             "created_at":
-                datetime.now()
+                datetime.utcnow()
 
         }
 
@@ -965,14 +1079,10 @@ def add_schedule():
 
 
 # =========================================================
-# GET SCHEDULE
-# ONLY CURRENT USER
+# SCHEDULE - GET
 # =========================================================
 
-@app.route(
-    "/api/schedule",
-    methods=["GET"]
-)
+@app.route("/api/schedule", methods=["GET"])
 def get_schedule():
 
     try:
@@ -994,10 +1104,6 @@ def get_schedule():
         schedules = list(
 
             schedule_collection.find({
-
-                # VERY IMPORTANT
-                # NEVER use schedule_collection.find()
-                # without user_id
 
                 "user_id":
                     user_id
@@ -1061,13 +1167,10 @@ def get_schedule():
 
 
 # =========================================================
-# DELETE SCHEDULE
+# SCHEDULE - DELETE
 # =========================================================
 
-@app.route(
-    "/api/schedule/<schedule_id>",
-    methods=["DELETE"]
-)
+@app.route("/api/schedule/<schedule_id>", methods=["DELETE"])
 def delete_schedule(schedule_id):
 
     try:
@@ -1133,13 +1236,10 @@ def delete_schedule(schedule_id):
 
 
 # =========================================================
-# HABITS
+# HABITS - SAVE
 # =========================================================
 
-@app.route(
-    "/api/habits",
-    methods=["POST"]
-)
+@app.route("/api/habits", methods=["POST"])
 def save_habits():
 
     try:
@@ -1158,7 +1258,7 @@ def save_habits():
             }), 401
 
 
-        data = request.get_json()
+        data = request.get_json() or {}
 
 
         sleep_time = data.get(
@@ -1210,7 +1310,7 @@ def save_habits():
                 float(study_time),
 
             "created_at":
-                datetime.now()
+                datetime.utcnow()
 
         }
 
@@ -1263,14 +1363,10 @@ def save_habits():
 
 
 # =========================================================
-# GET HABITS
-# ONLY CURRENT USER
+# HABITS - GET
 # =========================================================
 
-@app.route(
-    "/api/habits",
-    methods=["GET"]
-)
+@app.route("/api/habits", methods=["GET"])
 def get_habits():
 
     try:
@@ -1292,19 +1388,15 @@ def get_habits():
         habit = habits_collection.find_one(
 
             {
-
                 "user_id":
                     user_id
-
             },
 
             sort=[
-
                 (
                     "created_at",
                     -1
                 )
-
             ]
 
         )
@@ -1373,41 +1465,6 @@ def get_habits():
 
 
 # =========================================================
-# TEST CURRENT SESSION
-# =========================================================
-
-@app.route(
-    "/api/test-auth",
-    methods=["GET"]
-)
-def test_auth():
-
-    user_id = session.get(
-        "user_id"
-    )
-
-    username = session.get(
-        "username"
-    )
-
-
-    return jsonify({
-
-        "success": True,
-
-        "logged_in":
-            bool(user_id),
-
-        "user_id":
-            user_id,
-
-        "username":
-            username
-
-    })
-
-
-# =========================================================
 # RUN SERVER
 # =========================================================
 
@@ -1418,16 +1475,25 @@ if __name__ == "__main__":
     print("          ChronoAI Backend")
     print("==========================================")
     print("Database : ChronoAI")
-    print()
     print("USER DATA ISOLATION ENABLED")
-    print()
-    print("Server:")
-    print("http://127.0.0.1:5000")
     print("==========================================")
     print()
 
+
+    # IMPORTANT:
+    # 0.0.0.0 is required for Render
+
     app.run(
-        host="127.0.0.1",
-        port=5000,
-        debug=True
+
+        host="0.0.0.0",
+
+        port=int(
+            os.environ.get(
+                "PORT",
+                5000
+            )
+        ),
+
+        debug=False
+
     )
