@@ -1,9 +1,126 @@
 import { useEffect, useState } from "react";
 import "./App.css";
+import "./login.css";
 
-const API = "http://127.0.0.1:5000";
+const API = "http://localhost:5000";
+
+
+function Login({ onLogin }) {
+  const [mode, setMode] = useState("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submitForm = async (e) => {
+    e.preventDefault();
+    setMessage("");
+
+    if (!username.trim() || !password) {
+      setMessage("Please enter username and password.");
+      return;
+    }
+
+    if (mode === "register" && password !== confirmPassword) {
+      setMessage("Passwords do not match.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const endpoint = mode === "login" ? "/api/login" : "/api/register";
+      const response = await fetch(`${API}${endpoint}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        setMessage(data.message || "Invalid username or password.");
+        return;
+      }
+
+      if (mode === "register") {
+        const loginResponse = await fetch(`${API}/api/login`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username.trim(), password }),
+        });
+        const loginData = await loginResponse.json();
+        if (!loginResponse.ok || !loginData.success) {
+          setMessage("Account created. Please login.");
+          setMode("login");
+          setPassword("");
+          setConfirmPassword("");
+          return;
+        }
+        onLogin(loginData.user);
+        return;
+      }
+
+      onLogin(data.user);
+    } catch (error) {
+      console.error(error);
+      setMessage("Cannot connect to backend. Make sure Flask is running.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-page">
+      <div className="login-card">
+        <div className="login-logo">
+          <span>✦</span> Chrono<span>AI</span>
+        </div>
+        <h1>{mode === "login" ? "Welcome back" : "Create your account"}</h1>
+        <p className="login-subtitle">
+          {mode === "login"
+            ? "Sign in to continue to your productivity planner."
+            : "Create an account to keep your ChronoAI data private."}
+        </p>
+        <form onSubmit={submitForm}>
+          <label>Username</label>
+          <input type="text" placeholder="Enter username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
+          <label>Password</label>
+          <input type="password" placeholder="Enter password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} />
+          {mode === "register" && (
+            <>
+              <label>Confirm Password</label>
+              <input type="password" placeholder="Re-enter password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" />
+            </>
+          )}
+          {message && <div className="login-message">{message}</div>}
+          <button className="login-button" type="submit" disabled={loading}>
+            {loading ? "Please wait..." : mode === "login" ? "Login" : "Create Account"}
+          </button>
+        </form>
+        <div className="login-switch">
+          {mode === "login" ? (
+            <>New user? <button type="button" onClick={() => { setMode("register"); setMessage(""); }}>Create an account</button></>
+          ) : (
+            <>Already have an account? <button type="button" onClick={() => { setMode("login"); setMessage(""); }}>Login</button></>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function App() {
+  // =========================================================
+  // LOGIN / AUTHENTICATION
+  // =========================================================
+
+  const [user, setUser] = useState(null);
+  const [checkingLogin, setCheckingLogin] = useState(true);
+
   // =========================================================
   // TASKS
   // =========================================================
@@ -39,10 +156,46 @@ function App() {
   // =========================================================
 
   useEffect(() => {
+    checkLogin();
+  }, []);
+
+  const checkLogin = async () => {
+    try {
+      const response = await fetch(`${API}/api/me`, {
+        credentials: "include",
+      });
+      const data = await response.json();
+
+      if (data.success && data.user) {
+        setUser(data.user);
+      }
+    } catch (error) {
+      console.log("Could not check login:", error);
+    } finally {
+      setCheckingLogin(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API}/api/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch (error) {
+      console.log("Logout error:", error);
+    }
+
+    setUser(null);
+  };
+
+  useEffect(() => {
+    if (!user) return;
+
     loadTasks();
     loadSchedule();
     loadHabits();
-  }, []);
+  }, [user]);
 
   // =========================================================
   // LOAD TASKS
@@ -50,7 +203,7 @@ function App() {
 
   const loadTasks = async () => {
     try {
-      const response = await fetch(`${API}/api/tasks`);
+      const response = await fetch(`${API}/api/tasks`, { credentials: "include" });
       const data = await response.json();
 
       if (data.success) {
@@ -74,6 +227,7 @@ function App() {
     try {
       const response = await fetch(`${API}/api/tasks`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
         },
@@ -118,6 +272,7 @@ function App() {
         `${API}/api/tasks/${id}`,
         {
           method: "PUT",
+          credentials: "include",
           headers: {
             "Content-Type": "application/json",
           },
@@ -156,6 +311,7 @@ function App() {
         `${API}/api/tasks/${id}`,
         {
           method: "DELETE",
+          credentials: "include",
         }
       );
 
@@ -427,7 +583,8 @@ function App() {
   const loadSchedule = async () => {
     try {
       const response = await fetch(
-        `${API}/api/schedule`
+        `${API}/api/schedule`,
+        { credentials: "include" }
       );
 
       const data = await response.json();
@@ -458,6 +615,7 @@ function App() {
         `${API}/api/schedule`,
         {
           method: "POST",
+          credentials: "include",
           headers: {
             "Content-Type": "application/json",
           },
@@ -495,6 +653,7 @@ function App() {
         `${API}/api/schedule/${id}`,
         {
           method: "DELETE",
+          credentials: "include",
         }
       );
 
@@ -519,7 +678,8 @@ function App() {
   const loadHabits = async () => {
     try {
       const response = await fetch(
-        `${API}/api/habits`
+        `${API}/api/habits`,
+        { credentials: "include" }
       );
 
       const data = await response.json();
@@ -581,6 +741,7 @@ function App() {
         `${API}/api/habits`,
         {
           method: "POST",
+          credentials: "include",
           headers: {
             "Content-Type": "application/json",
           },
@@ -646,6 +807,27 @@ function App() {
   // RENDER
   // =========================================================
 
+  if (checkingLogin) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: "20px",
+          fontWeight: "600",
+        }}
+      >
+        Loading ChronoAI...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login onLogin={(loggedInUser) => setUser(loggedInUser)} />;
+  }
+
   return (
     <div className="app">
 
@@ -690,8 +872,16 @@ function App() {
             ♧
           </div>
 
-          <div className="profile">
-            P
+          <div
+            className="profile"
+            title={user?.username || "User"}
+          >
+            {(user?.username || "U").charAt(0).toUpperCase()}
+          </div>
+
+          <div className="user-menu">
+            <span>{user?.username || "User"}</span>
+            <button onClick={handleLogout}>Logout</button>
           </div>
 
         </div>

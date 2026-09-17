@@ -4,3 +4,6 @@ scikit-learn
 joblib
 Flask
 flask-cors
+pymongo
+dnspython
+gunicorn
