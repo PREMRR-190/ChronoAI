@@ -1,177 +1,237 @@
+import os
+from datetime import datetime, timezone
+
 from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
-import os
 
 
-# =========================================================
+# ==================================================
 # FLASK
-# =========================================================
+# ==================================================
 
 app = Flask(__name__)
 
-# Render environment variable
-app.config["SECRET_KEY"] = os.environ.get(
+
+# ==================================================
+# SECRET KEY
+# ==================================================
+
+SECRET_KEY = os.environ.get(
     "SECRET_KEY",
     os.environ.get(
         "CHRONOAI_SECRET_KEY",
-        "dev-secret-change-me"
+        "chronoai-dev-secret-change-me"
     )
 )
 
-# =========================================================
-# PRODUCTION SESSION CONFIGURATION
-# =========================================================
+app.secret_key = SECRET_KEY
+
+
+# ==================================================
+# FRONTEND URL
+# ==================================================
+
+FRONTEND_URL = os.environ.get(
+    "FRONTEND_URL",
+    "http://localhost:5173"
+).rstrip("/")
+
+
+# ==================================================
+# PRODUCTION
+# ==================================================
 
 PRODUCTION = (
     os.environ.get("PRODUCTION", "false").lower() == "true"
 )
 
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SECURE"] = PRODUCTION
 
-if PRODUCTION:
-    app.config["SESSION_COOKIE_SAMESITE"] = "None"
-else:
-    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-
-
-# =========================================================
+# ==================================================
 # CORS
-# =========================================================
-
-FRONTEND_URL = os.environ.get(
-    "FRONTEND_URL",
-    "http://localhost:5173"
-)
+# ==================================================
 
 allowed_origins = [
+    FRONTEND_URL,
+    "https://chronoai-orcin.vercel.app",
+    "https://chronoai-atf468m0i-prem-f4e7.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    FRONTEND_URL,
-    "https://chronoai-orcin.vercel.app"
 ]
 
-# Remove duplicates
+# Remove duplicate origins
 allowed_origins = list(set(allowed_origins))
 
 
 CORS(
     app,
-    supports_credentials=True,
-    origins=allowed_origins
+    resources={
+        r"/api/*": {
+            "origins": allowed_origins
+        }
+    },
+    supports_credentials=True
 )
 
 
-# =========================================================
-# MONGODB ATLAS
-# =========================================================
+# ==================================================
+# SESSION COOKIE
+# ==================================================
 
-MONGO_URI = os.environ.get("MONGO_URI")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 
-if not MONGO_URI:
-    print("WARNING: MONGO_URI environment variable is not set.")
+app.config["SESSION_COOKIE_SECURE"] = PRODUCTION
 
-    # Local development fallback
-    MONGO_URI = "mongodb://127.0.0.1:27017/"
+app.config["SESSION_COOKIE_SAMESITE"] = (
+    "None" if PRODUCTION else "Lax"
+)
+
+app.config["SESSION_COOKIE_PATH"] = "/"
+
+app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 30
 
 
-try:
+# ==================================================
+# MONGODB
+# ==================================================
 
-    client = MongoClient(
-        MONGO_URI,
-        serverSelectionTimeoutMS=10000
-    )
+# Render will provide MONGO_URI
+# Local computer will use localhost if MONGO_URI is not set
 
-    # Test MongoDB connection
-    client.admin.command("ping")
+MONGO_URI = os.environ.get(
+    "MONGO_URI",
+    "mongodb://127.0.0.1:27017/"
+)
 
-    print("MongoDB connection successful")
 
-except Exception as e:
-
-    print("MongoDB connection error:", e)
+client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=10000
+)
 
 
 db = client["ChronoAI"]
 
+
+# ==================================================
+# COLLECTIONS
+# ==================================================
+
 users_collection = db["users"]
+
 tasks_collection = db["tasks"]
+
 schedule_collection = db["schedules"]
+
 habits_collection = db["daily_habits"]
 
 
-# =========================================================
-# AUTHENTICATION HELPER
-# =========================================================
+# ==================================================
+# USERNAME INDEX
+# ==================================================
 
-def get_logged_user():
+# Prevent duplicate usernames in MongoDB
 
-    user_id = session.get("user_id")
+try:
+    users_collection.create_index(
+        "username",
+        unique=True
+    )
+except Exception:
+    pass
 
-    if not user_id:
-        return None
 
+# ==================================================
+# HELPERS
+# ==================================================
+
+def current_user_id():
+    return session.get("user_id")
+
+
+def login_required():
+    if not current_user_id():
+        return jsonify({
+            "success": False,
+            "message": "Please login first"
+        }), 401
+
+    return None
+
+
+def serialize_user(user):
+    return {
+        "id": str(user["_id"]),
+        "username": user["username"]
+    }
+
+
+def object_id(value):
     try:
-
-        user = users_collection.find_one({
-            "_id": ObjectId(user_id)
-        })
-
-        return user
-
-    except Exception as e:
-
-        print("GET LOGGED USER ERROR:", e)
-
+        return ObjectId(value)
+    except Exception:
         return None
 
 
-def require_login():
-
-    user = get_logged_user()
-
-    if not user:
-        return None
-
-    return str(user["_id"])
+def utc_now():
+    return datetime.now(timezone.utc)
 
 
-# =========================================================
-# HOME / HEALTH CHECK
-# =========================================================
+# ==================================================
+# HOME
+# ==================================================
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
 
     return jsonify({
         "success": True,
-        "login_system": True,
-        "message": "ChronoAI Backend is running!"
+        "message": "ChronoAI Backend is running!",
+        "login_system": True
     })
 
 
-# =========================================================
+# ==================================================
+# HEALTH CHECK
+# ==================================================
+
+@app.route("/api/health", methods=["GET"])
+def health():
+
+    try:
+
+        # Test MongoDB connection
+        client.admin.command("ping")
+
+        return jsonify({
+            "success": True,
+            "flask": True,
+            "mongodb": True,
+            "message": "ChronoAI API and MongoDB are working"
+        }), 200
+
+    except Exception as e:
+
+        return jsonify({
+            "success": False,
+            "flask": True,
+            "mongodb": False,
+            "message": str(e)
+        }), 500
+
+
+# ==================================================
 # REGISTER
-# =========================================================
+# ==================================================
 
 @app.route("/api/register", methods=["POST"])
 def register():
 
     try:
 
-        data = request.get_json()
-
-        if not data:
-
-            return jsonify({
-                "success": False,
-                "message": "No data received"
-            }), 400
-
+        data = request.get_json(silent=True) or {}
 
         username = str(
             data.get("username", "")
@@ -182,43 +242,29 @@ def register():
         )
 
 
-        if not username:
-
-            return jsonify({
-                "success": False,
-                "message": "Username is required"
-            }), 400
-
-
-        if not password:
-
-            return jsonify({
-                "success": False,
-                "message": "Password is required"
-            }), 400
-
+        # ------------------------------
+        # VALIDATION
+        # ------------------------------
 
         if len(username) < 3:
 
             return jsonify({
                 "success": False,
-                "message":
-                    "Username must contain at least 3 characters"
+                "message": "Username must be at least 3 characters"
             }), 400
 
 
-        if len(password) < 4:
+        if len(password) < 6:
 
             return jsonify({
                 "success": False,
-                "message":
-                    "Password must contain at least 4 characters"
+                "message": "Password must be at least 6 characters"
             }), 400
 
 
-        # =================================================
+        # ------------------------------
         # CHECK EXISTING USER
-        # =================================================
+        # ------------------------------
 
         existing_user = users_collection.find_one({
             "username": username
@@ -233,38 +279,30 @@ def register():
             }), 409
 
 
-        # =================================================
-        # HASH PASSWORD
-        # =================================================
+        # ------------------------------
+        # CREATE USER
+        # ------------------------------
 
-        password_hash = generate_password_hash(
+        hashed_password = generate_password_hash(
             password
         )
 
 
-        # =================================================
-        # CREATE USER
-        # =================================================
-
-        new_user = {
-
+        user = {
             "username": username,
-
-            "password": password_hash,
-
-            "created_at": datetime.utcnow()
-
+            "password": hashed_password,
+            "created_at": utc_now()
         }
 
 
-        result = users_collection.insert_one(
-            new_user
-        )
+        result = users_collection.insert_one(user)
+
+        user["_id"] = result.inserted_id
 
 
-        # =================================================
-        # LOGIN USER AUTOMATICALLY
-        # =================================================
+        # ------------------------------
+        # AUTO LOGIN
+        # ------------------------------
 
         session.clear()
 
@@ -274,71 +312,41 @@ def register():
 
         session["username"] = username
 
-
-        print(
-            "REGISTER:",
-            username,
-            "USER ID:",
-            str(result.inserted_id)
-        )
+        session.permanent = True
 
 
         return jsonify({
 
             "success": True,
 
-            "message":
-                "Account created successfully",
+            "message": "Account created successfully",
 
-            "user": {
-
-                "id":
-                    str(result.inserted_id),
-
-                "username":
-                    username
-
-            }
+            "user": serialize_user(user)
 
         }), 201
 
 
     except Exception as e:
 
-        print("REGISTER ERROR:", e)
-
         return jsonify({
 
             "success": False,
 
-            "message":
-                "Registration failed: " + str(e)
+            "message": f"Registration failed: {str(e)}"
 
         }), 500
 
 
-# =========================================================
+# ==================================================
 # LOGIN
-# =========================================================
+# ==================================================
 
 @app.route("/api/login", methods=["POST"])
 def login():
 
     try:
 
-        data = request.get_json()
-
-        if not data:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "No login data received"
-
-            }), 400
-
+        data = request.get_json(silent=True) or {}
 
         username = str(
             data.get("username", "")
@@ -348,6 +356,10 @@ def login():
             data.get("password", "")
         )
 
+
+        # ------------------------------
+        # VALIDATION
+        # ------------------------------
 
         if not username or not password:
 
@@ -361,23 +373,20 @@ def login():
             }), 400
 
 
-        # =================================================
-        # FIND USER IN MONGODB
-        # =================================================
+        # ------------------------------
+        # FIND USER
+        # ------------------------------
 
         user = users_collection.find_one({
-
             "username": username
-
         })
 
 
-        if not user:
+        # ------------------------------
+        # CHECK PASSWORD
+        # ------------------------------
 
-            print(
-                "LOGIN FAILED - USER NOT FOUND:",
-                username
-            )
+        if not user:
 
             return jsonify({
 
@@ -388,10 +397,6 @@ def login():
 
             }), 401
 
-
-        # =================================================
-        # CHECK PASSWORD
-        # =================================================
 
         stored_password = user.get(
             "password",
@@ -404,11 +409,6 @@ def login():
             password
         ):
 
-            print(
-                "LOGIN FAILED - WRONG PASSWORD:",
-                username
-            )
-
             return jsonify({
 
                 "success": False,
@@ -419,9 +419,9 @@ def login():
             }), 401
 
 
-        # =================================================
+        # ------------------------------
         # CREATE SESSION
-        # =================================================
+        # ------------------------------
 
         session.clear()
 
@@ -431,94 +431,134 @@ def login():
 
         session["username"] = user["username"]
 
-
-        print(
-            "LOGIN SUCCESS:",
-            user["username"],
-            "USER ID:",
-            str(user["_id"])
-        )
+        session.permanent = True
 
 
         return jsonify({
 
             "success": True,
 
-            "message":
-                "Login successful",
+            "message": "Login successful",
 
-            "user": {
+            "user": serialize_user(user)
 
-                "id":
-                    str(user["_id"]),
-
-                "username":
-                    user["username"]
-
-            }
-
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("LOGIN ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message":
-                "Login failed: " + str(e)
+            "message": f"Login failed: {str(e)}"
 
         }), 500
 
 
-# =========================================================
+# ==================================================
 # CURRENT USER
-# =========================================================
+# ==================================================
 
 @app.route("/api/me", methods=["GET"])
 def me():
 
     try:
 
-        user = get_logged_user()
+        user_id = current_user_id()
 
 
-        if not user:
+        if not user_id:
 
             return jsonify({
 
                 "success": False,
+                "user": None
 
-                "logged_in": False
+            }), 401
 
-            })
+
+        oid = object_id(user_id)
+
+
+        if oid is None:
+
+            session.clear()
+
+            return jsonify({
+
+                "success": False,
+                "user": None
+
+            }), 401
+
+
+        user = users_collection.find_one({
+            "_id": oid
+        })
+
+
+        if not user:
+
+            session.clear()
+
+            return jsonify({
+
+                "success": False,
+                "user": None
+
+            }), 401
 
 
         return jsonify({
 
             "success": True,
 
-            "logged_in": True,
+            "user": serialize_user(user)
 
-            "user": {
-
-                "id":
-                    str(user["_id"]),
-
-                "username":
-                    user["username"]
-
-            }
-
-        })
+        }), 200
 
 
     except Exception as e:
 
-        print("ME ERROR:", e)
+        return jsonify({
+
+            "success": False,
+
+            "message": str(e)
+
+        }), 500
+
+
+# ==================================================
+# LOGOUT
+# ==================================================
+
+@app.route("/api/logout", methods=["POST"])
+def logout():
+
+    session.clear()
+
+    return jsonify({
+
+        "success": True,
+
+        "message": "Logged out successfully"
+
+    }), 200
+
+
+# ==================================================
+# TEST AUTH
+# ==================================================
+
+@app.route("/api/test-auth", methods=["GET"])
+def test_auth():
+
+    user_id = current_user_id()
+
+
+    if not user_id:
 
         return jsonify({
 
@@ -526,105 +566,48 @@ def me():
 
             "logged_in": False
 
-        })
-
-
-# =========================================================
-# LOGOUT
-# =========================================================
-
-@app.route("/api/logout", methods=["POST"])
-def logout():
-
-    username = session.get(
-        "username",
-        "Unknown"
-    )
-
-    print(
-        "LOGOUT:",
-        username
-    )
-
-    session.clear()
+        }), 401
 
 
     return jsonify({
 
         "success": True,
 
-        "message":
-            "Logged out successfully"
-
-    })
-
-
-# =========================================================
-# TEST AUTHENTICATION
-# =========================================================
-
-@app.route("/api/test-auth", methods=["GET"])
-def test_auth():
-
-    user_id = session.get(
-        "user_id"
-    )
-
-    username = session.get(
-        "username"
-    )
-
-
-    return jsonify({
-
-        "success": True,
-
-        "logged_in":
-            bool(user_id),
-
-        "user_id":
-            user_id,
+        "logged_in": True,
 
         "username":
-            username
+            session.get("username")
 
-    })
+    }), 200
 
 
-# =========================================================
-# TASKS - ADD
-# =========================================================
+# ==================================================
+# TASKS
+# ==================================================
 
 @app.route("/api/tasks", methods=["POST"])
 def add_task():
 
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
     try:
 
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
-
-        data = request.get_json() or {}
+        data = request.get_json(silent=True) or {}
 
 
         title = str(
             data.get("title", "")
         ).strip()
 
-        priority = data.get(
-            "priority",
-            "Medium"
+
+        priority = str(
+            data.get("priority", "Medium")
         )
+
 
         hours = data.get(
             "hours",
@@ -644,10 +627,28 @@ def add_task():
             }), 400
 
 
+        # Validate hours
+
+        try:
+            hours = float(hours)
+
+        except (TypeError, ValueError):
+
+            return jsonify({
+
+                "success": False,
+
+                "message":
+                    "Hours must be a number"
+
+            }), 400
+
+
         task = {
 
+            # Every task belongs to one user
             "user_id":
-                user_id,
+                current_user_id(),
 
             "title":
                 title,
@@ -656,20 +657,17 @@ def add_task():
                 priority,
 
             "hours":
-                float(hours),
+                hours,
 
             "completed":
                 False,
 
             "created_at":
-                datetime.utcnow()
-
+                utc_now()
         }
 
 
-        result = tasks_collection.insert_one(
-            task
-        )
+        result = tasks_collection.insert_one(task)
 
 
         return jsonify({
@@ -688,7 +686,7 @@ def add_task():
                     priority,
 
                 "hours":
-                    float(hours),
+                    hours,
 
                 "completed":
                     False
@@ -700,46 +698,37 @@ def add_task():
 
     except Exception as e:
 
-        print("ADD TASK ERROR:", e)
-
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# TASKS - GET
-# =========================================================
+# ==================================================
+# GET TASKS
+# ==================================================
 
 @app.route("/api/tasks", methods=["GET"])
 def get_tasks():
 
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
     try:
-
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
 
         tasks = list(
 
             tasks_collection.find({
 
                 "user_id":
-                    user_id
+                    current_user_id()
 
             }).sort(
 
@@ -795,46 +784,57 @@ def get_tasks():
             "tasks":
                 result
 
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("GET TASKS ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# TASKS - UPDATE
-# =========================================================
+# ==================================================
+# UPDATE TASK
+# ==================================================
 
-@app.route("/api/tasks/<task_id>", methods=["PUT"])
+@app.route(
+    "/api/tasks/<task_id>",
+    methods=["PUT"]
+)
 def update_task(task_id):
+
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
+    oid = object_id(task_id)
+
+
+    if oid is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "message":
+                "Invalid task ID"
+
+        }), 400
+
 
     try:
 
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
-
-        data = request.get_json() or {}
+        data = request.get_json(
+            silent=True
+        ) or {}
 
 
         completed = bool(
@@ -848,24 +848,16 @@ def update_task(task_id):
         result = tasks_collection.update_one(
 
             {
-
-                "_id":
-                    ObjectId(task_id),
-
+                "_id": oid,
                 "user_id":
-                    user_id
-
+                    current_user_id()
             },
 
             {
-
                 "$set": {
-
                     "completed":
                         completed
-
                 }
-
             }
 
         )
@@ -890,52 +882,60 @@ def update_task(task_id):
             "message":
                 "Task updated successfully"
 
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("UPDATE TASK ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# TASKS - DELETE
-# =========================================================
+# ==================================================
+# DELETE TASK
+# ==================================================
 
-@app.route("/api/tasks/<task_id>", methods=["DELETE"])
+@app.route(
+    "/api/tasks/<task_id>",
+    methods=["DELETE"]
+)
 def delete_task(task_id):
+
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
+    oid = object_id(task_id)
+
+
+    if oid is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "message":
+                "Invalid task ID"
+
+        }), 400
+
 
     try:
 
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
-
         result = tasks_collection.delete_one({
 
-            "_id":
-                ObjectId(task_id),
+            "_id": oid,
 
             "user_id":
-                user_id
+                current_user_id()
 
         })
 
@@ -959,55 +959,51 @@ def delete_task(task_id):
             "message":
                 "Task deleted successfully"
 
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("DELETE TASK ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# SCHEDULE - ADD
-# =========================================================
+# ==================================================
+# SCHEDULE
+# ==================================================
 
-@app.route("/api/schedule", methods=["POST"])
+@app.route(
+    "/api/schedule",
+    methods=["POST"]
+)
 def add_schedule():
+
+    auth = login_required()
+
+    if auth:
+        return auth
+
 
     try:
 
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
+        data = request.get_json(
+            silent=True
+        ) or {}
 
 
-        data = request.get_json() or {}
+        time = str(
+            data.get("time", "")
+        ).strip()
 
-
-        time = data.get("time")
 
         activity = str(
-            data.get(
-                "activity",
-                ""
-            )
+            data.get("activity", "")
         ).strip()
 
 
@@ -1026,7 +1022,7 @@ def add_schedule():
         schedule = {
 
             "user_id":
-                user_id,
+                current_user_id(),
 
             "time":
                 time,
@@ -1035,7 +1031,7 @@ def add_schedule():
                 activity,
 
             "created_at":
-                datetime.utcnow()
+                utc_now()
 
         }
 
@@ -1067,46 +1063,40 @@ def add_schedule():
 
     except Exception as e:
 
-        print("ADD SCHEDULE ERROR:", e)
-
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# SCHEDULE - GET
-# =========================================================
+# ==================================================
+# GET SCHEDULE
+# ==================================================
 
-@app.route("/api/schedule", methods=["GET"])
+@app.route(
+    "/api/schedule",
+    methods=["GET"]
+)
 def get_schedule():
 
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
     try:
-
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
 
         schedules = list(
 
             schedule_collection.find({
 
                 "user_id":
-                    user_id
+                    current_user_id()
 
             }).sort(
 
@@ -1150,52 +1140,60 @@ def get_schedule():
             "schedule":
                 result
 
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("GET SCHEDULE ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# SCHEDULE - DELETE
-# =========================================================
+# ==================================================
+# DELETE SCHEDULE
+# ==================================================
 
-@app.route("/api/schedule/<schedule_id>", methods=["DELETE"])
+@app.route(
+    "/api/schedule/<schedule_id>",
+    methods=["DELETE"]
+)
 def delete_schedule(schedule_id):
+
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
+    oid = object_id(schedule_id)
+
+
+    if oid is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "message":
+                "Invalid schedule ID"
+
+        }), 400
+
 
     try:
 
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
-
         result = schedule_collection.delete_one({
 
-            "_id":
-                ObjectId(schedule_id),
+            "_id": oid,
 
             "user_id":
-                user_id
+                current_user_id()
 
         })
 
@@ -1219,60 +1217,65 @@ def delete_schedule(schedule_id):
             "message":
                 "Schedule deleted successfully"
 
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("DELETE SCHEDULE ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# HABITS - SAVE
-# =========================================================
+# ==================================================
+# DAILY HABITS
+# ==================================================
 
-@app.route("/api/habits", methods=["POST"])
+@app.route(
+    "/api/habits",
+    methods=["POST"]
+)
 def save_habits():
+
+    auth = login_required()
+
+    if auth:
+        return auth
+
 
     try:
 
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
+        data = request.get_json(
+            silent=True
+        ) or {}
 
 
-        data = request.get_json() or {}
+        sleep_time = str(
+            data.get(
+                "sleep_time",
+                ""
+            )
+        ).strip()
 
 
-        sleep_time = data.get(
-            "sleep_time"
-        )
+        wake_time = str(
+            data.get(
+                "wake_time",
+                ""
+            )
+        ).strip()
 
-        wake_time = data.get(
-            "wake_time"
-        )
 
         screen_time = data.get(
             "screen_time",
             0
         )
+
 
         study_time = data.get(
             "study_time",
@@ -1292,10 +1295,27 @@ def save_habits():
             }), 400
 
 
+        try:
+
+            screen_time = float(screen_time)
+            study_time = float(study_time)
+
+        except (TypeError, ValueError):
+
+            return jsonify({
+
+                "success": False,
+
+                "message":
+                    "Screen time and study time must be numbers"
+
+            }), 400
+
+
         habit = {
 
             "user_id":
-                user_id,
+                current_user_id(),
 
             "sleep_time":
                 sleep_time,
@@ -1304,13 +1324,13 @@ def save_habits():
                 wake_time,
 
             "screen_time":
-                float(screen_time),
+                screen_time,
 
             "study_time":
-                float(study_time),
+                study_time,
 
             "created_at":
-                datetime.utcnow()
+                utc_now()
 
         }
 
@@ -1339,10 +1359,10 @@ def save_habits():
                     wake_time,
 
                 "screen_time":
-                    float(screen_time),
+                    screen_time,
 
                 "study_time":
-                    float(study_time)
+                    study_time
 
             }
 
@@ -1351,45 +1371,39 @@ def save_habits():
 
     except Exception as e:
 
-        print("SAVE HABITS ERROR:", e)
-
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
-# HABITS - GET
-# =========================================================
+# ==================================================
+# GET HABITS
+# ==================================================
 
-@app.route("/api/habits", methods=["GET"])
+@app.route(
+    "/api/habits",
+    methods=["GET"]
+)
 def get_habits():
 
+    auth = login_required()
+
+    if auth:
+        return auth
+
+
     try:
-
-        user_id = require_login()
-
-        if not user_id:
-
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Please login first"
-
-            }), 401
-
 
         habit = habits_collection.find_one(
 
             {
                 "user_id":
-                    user_id
+                    current_user_id()
             },
 
             sort=[
@@ -1410,7 +1424,7 @@ def get_habits():
 
                 "habit": None
 
-            })
+            }), 200
 
 
         return jsonify({
@@ -1448,52 +1462,48 @@ def get_habits():
 
             }
 
-        })
+        }), 200
 
 
     except Exception as e:
-
-        print("GET HABITS ERROR:", e)
 
         return jsonify({
 
             "success": False,
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
-# =========================================================
+# ==================================================
 # RUN SERVER
-# =========================================================
+# ==================================================
 
 if __name__ == "__main__":
 
-    print()
-    print("==========================================")
-    print("          ChronoAI Backend")
-    print("==========================================")
-    print("Database : ChronoAI")
-    print("USER DATA ISOLATION ENABLED")
-    print("==========================================")
-    print()
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
 
 
-    # IMPORTANT:
-    # 0.0.0.0 is required for Render
+    print()
+    print("====================================")
+    print("       ChronoAI Backend Server")
+    print("====================================")
+    print(f"Frontend  : {FRONTEND_URL}")
+    print(f"Production: {PRODUCTION}")
+    print("Database  : ChronoAI")
+    print("====================================")
+    print()
+
 
     app.run(
-
         host="0.0.0.0",
-
-        port=int(
-            os.environ.get(
-                "PORT",
-                5000
-            )
-        ),
-
-        debug=False
-
+        port=port,
+        debug=not PRODUCTION
     )
