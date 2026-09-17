@@ -1,17 +1,9 @@
 import { useEffect, useState } from "react";
 import "./App.css";
-import Login from "./Login";
 
 const API = "https://chronoai-1.onrender.com";
 
 function App() {
-  // =========================================================
-  // LOGIN / AUTHENTICATION
-  // =========================================================
-
-  const [user, setUser] = useState(null);
-  const [checkingLogin, setCheckingLogin] = useState(true);
-
   // =========================================================
   // TASKS
   // =========================================================
@@ -47,46 +39,10 @@ function App() {
   // =========================================================
 
   useEffect(() => {
-    checkLogin();
-  }, []);
-
-  const checkLogin = async () => {
-    try {
-      const response = await fetch(`${API}/api/me`, {
-        credentials: "include",
-      });
-      const data = await response.json();
-
-      if (data.success && data.user) {
-        setUser(data.user);
-      }
-    } catch (error) {
-      console.log("Could not check login:", error);
-    } finally {
-      setCheckingLogin(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await fetch(`${API}/api/logout`, {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch (error) {
-      console.log("Logout error:", error);
-    }
-
-    setUser(null);
-  };
-
-  useEffect(() => {
-    if (!user) return;
-
     loadTasks();
     loadSchedule();
     loadHabits();
-  }, [user]);
+  }, []);
 
   // =========================================================
   // LOAD TASKS
@@ -94,7 +50,7 @@ function App() {
 
   const loadTasks = async () => {
     try {
-      const response = await fetch(`${API}/api/tasks`, { credentials: "include" });
+      const response = await fetch(`${API}/api/tasks`);
       const data = await response.json();
 
       if (data.success) {
@@ -121,7 +77,6 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        credentials: "include",
         body: JSON.stringify({
           title: taskName,
           priority: priority,
@@ -166,7 +121,6 @@ function App() {
           headers: {
             "Content-Type": "application/json",
           },
-          credentials: "include",
           body: JSON.stringify({
             completed: !task.completed,
           }),
@@ -202,7 +156,6 @@ function App() {
         `${API}/api/tasks/${id}`,
         {
           method: "DELETE",
-          credentials: "include",
         }
       );
 
@@ -508,7 +461,6 @@ function App() {
           headers: {
             "Content-Type": "application/json",
           },
-          credentials: "include",
           body: JSON.stringify({
             time: scheduleTime,
             activity: scheduleActivity,
@@ -543,7 +495,6 @@ function App() {
         `${API}/api/schedule/${id}`,
         {
           method: "DELETE",
-          credentials: "include",
         }
       );
 
@@ -633,7 +584,6 @@ function App() {
           headers: {
             "Content-Type": "application/json",
           },
-          credentials: "include",
           body: JSON.stringify({
             sleep_time: sleepTime,
             wake_time: wakeTime,
@@ -696,31 +646,6 @@ function App() {
   // RENDER
   // =========================================================
 
-  if (checkingLogin) {
-    return (
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: "20px",
-          fontWeight: "600",
-        }}
-      >
-        Loading ChronoAI...
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <Login
-        onLogin={(loggedInUser) => setUser(loggedInUser)}
-      />
-    );
-  }
-
   return (
     <div className="app">
 
@@ -765,16 +690,8 @@ function App() {
             ♧
           </div>
 
-          <div
-            className="profile"
-            title={user?.username || "User"}
-          >
-            {(user?.username || "U").charAt(0).toUpperCase()}
-          </div>
-
-          <div className="user-menu">
-            <span>{user?.username || "User"}</span>
-            <button onClick={handleLogout}>Logout</button>
+          <div className="profile">
+            P
           </div>
 
         </div>
