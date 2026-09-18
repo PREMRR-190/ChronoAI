@@ -1,9 +1,34 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-const API = "https://chronoai-1.onrender.com";
+const API = "https://chronoai-7.onrender.com";
+
+// =========================================================
+// BACKEND REQUEST HELPER
+// =========================================================
+// This automatically sends the Flask session cookie.
+
+const apiFetch = (url, options = {}) => {
+  return window.fetch(url, {
+    ...options,
+    credentials: "include",
+  });
+};
 
 function App() {
+  // =========================================================
+  // LOGIN / AUTHENTICATION
+  // =========================================================
+
+  const [user, setUser] = useState(null);
+  const [checkingLogin, setCheckingLogin] = useState(true);
+
+  const [authMode, setAuthMode] = useState("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
   // =========================================================
   // TASKS
   // =========================================================
@@ -35,14 +60,150 @@ function App() {
   const [habitsSaved, setHabitsSaved] = useState(false);
 
   // =========================================================
-  // LOAD DATA FROM BACKEND
+  // CHECK LOGIN SESSION
   // =========================================================
 
   useEffect(() => {
+    checkLogin();
+  }, []);
+
+  const checkLogin = async () => {
+    try {
+      const response = await apiFetch(`${API}/api/me`);
+      const data = await response.json();
+
+      if (data.success && data.user) {
+        setUser(data.user);
+      }
+    } catch (error) {
+      console.log("Could not check login:", error);
+    } finally {
+      setCheckingLogin(false);
+    }
+  };
+
+  // =========================================================
+  // LOGIN / REGISTER
+  // =========================================================
+
+  const handleAuthSubmit = async (event) => {
+    event.preventDefault();
+
+    const username = authUsername.trim();
+
+    if (!username || !authPassword) {
+      alert("Please enter username and password.");
+      return;
+    }
+
+    if (authMode === "register") {
+      if (username.length < 3) {
+        alert("Username must be at least 3 characters.");
+        return;
+      }
+
+      if (authPassword.length < 6) {
+        alert("Password must be at least 6 characters.");
+        return;
+      }
+
+      if (authPassword !== authConfirmPassword) {
+        alert("Passwords do not match.");
+        return;
+      }
+    }
+
+    setAuthLoading(true);
+
+    try {
+      const endpoint =
+        authMode === "login"
+          ? "/api/login"
+          : "/api/register";
+
+      const response = await apiFetch(
+        `${API}${endpoint}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            username,
+            password: authPassword,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        alert(
+          data.message ||
+            (
+              authMode === "login"
+                ? "Invalid username or password."
+                : "Registration failed."
+            )
+        );
+        return;
+      }
+
+      setUser(data.user);
+
+      setAuthUsername("");
+      setAuthPassword("");
+      setAuthConfirmPassword("");
+    } catch (error) {
+      console.log("Authentication error:", error);
+
+      alert(
+        "Cannot connect to the backend. Please try again."
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // =========================================================
+  // LOGOUT
+  // =========================================================
+
+  const handleLogout = async () => {
+    try {
+      await apiFetch(`${API}/api/logout`, {
+        method: "POST",
+      });
+    } catch (error) {
+      console.log("Logout error:", error);
+    }
+
+    setUser(null);
+
+    setTasks([]);
+    setSchedule([]);
+
+    setSleepTime("");
+    setWakeTime("");
+    setScreenTime("");
+    setStudyTime("");
+
+    setHabitsSaved(false);
+  };
+
+  // =========================================================
+  // LOAD USER DATA AFTER LOGIN
+  // =========================================================
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
     loadTasks();
     loadSchedule();
     loadHabits();
-  }, []);
+  }, [user]);
 
   // =========================================================
   // LOAD TASKS
@@ -50,14 +211,20 @@ function App() {
 
   const loadTasks = async () => {
     try {
-      const response = await fetch(`${API}/api/tasks`);
+      const response = await apiFetch(
+        `${API}/api/tasks`
+      );
+
       const data = await response.json();
 
       if (data.success) {
         setTasks(data.tasks);
       }
     } catch (error) {
-      console.log("Could not load tasks:", error);
+      console.log(
+        "Could not load tasks:",
+        error
+      );
     }
   };
 
@@ -72,17 +239,23 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${API}/api/tasks`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title: taskName,
-          priority: priority,
-          hours: Number(hours),
-        }),
-      });
+      const response = await apiFetch(
+        `${API}/api/tasks`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+
+          body: JSON.stringify({
+            title: taskName,
+            priority: priority,
+            hours: Number(hours),
+          }),
+        }
+      );
 
       const data = await response.json();
 
@@ -96,11 +269,17 @@ function App() {
         setPriority("Medium");
         setHours("1");
       } else {
-        alert(data.message || "Could not add task");
+        alert(
+          data.message ||
+            "Could not add task"
+        );
       }
     } catch (error) {
       console.log(error);
-      alert("Backend is not running");
+
+      alert(
+        "Cannot connect to the backend."
+      );
     }
   };
 
@@ -109,36 +288,50 @@ function App() {
   // =========================================================
 
   const toggleTask = async (id) => {
-    const task = tasks.find((item) => item.id === id);
+    const task = tasks.find(
+      (item) => item.id === id
+    );
 
     if (!task) return;
 
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/tasks/${id}`,
         {
           method: "PUT",
+
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
           },
+
           body: JSON.stringify({
-            completed: !task.completed,
+            completed:
+              !task.completed,
           }),
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (data.success) {
         setTasks((previousTasks) =>
-          previousTasks.map((item) =>
-            item.id === id
-              ? {
-                  ...item,
-                  completed: !item.completed,
-                }
-              : item
+          previousTasks.map(
+            (item) =>
+              item.id === id
+                ? {
+                    ...item,
+                    completed:
+                      !item.completed,
+                  }
+                : item
           )
+        );
+      } else {
+        alert(
+          data.message ||
+            "Could not update task"
         );
       }
     } catch (error) {
@@ -152,20 +345,27 @@ function App() {
 
   const deleteTask = async (id) => {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/tasks/${id}`,
         {
           method: "DELETE",
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (data.success) {
         setTasks((previousTasks) =>
           previousTasks.filter(
-            (task) => task.id !== id
+            (task) =>
+              task.id !== id
           )
+        );
+      } else {
+        alert(
+          data.message ||
+            "Could not delete task"
         );
       }
     } catch (error) {
@@ -186,17 +386,18 @@ function App() {
 
   const sortedTasks = [...tasks].sort(
     (a, b) =>
-      priorityValue[a.priority] -
-      priorityValue[b.priority]
+      (priorityValue[a.priority] || 2) -
+      (priorityValue[b.priority] || 2)
   );
 
   const activeTasks = sortedTasks.filter(
     (task) => !task.completed
   );
 
-  const completedTasks = sortedTasks.filter(
-    (task) => task.completed
-  );
+  const completedTasks =
+    sortedTasks.filter(
+      (task) => task.completed
+    );
 
   // =========================================================
   // TASK COMPLETION
@@ -215,11 +416,13 @@ function App() {
   // PLANNED HOURS
   // =========================================================
 
-  const plannedHours = tasks.reduce(
-    (sum, task) =>
-      sum + Number(task.hours || 0),
-    0
-  );
+  const plannedHours =
+    tasks.reduce(
+      (sum, task) =>
+        sum +
+        Number(task.hours || 0),
+      0
+    );
 
   // =========================================================
   // SLEEP DURATION
@@ -230,30 +433,47 @@ function App() {
       return 0;
     }
 
-    const [sleepHour, sleepMinute] =
-      sleepTime.split(":").map(Number);
+    const [
+      sleepHour,
+      sleepMinute,
+    ] =
+      sleepTime
+        .split(":")
+        .map(Number);
 
-    const [wakeHour, wakeMinute] =
-      wakeTime.split(":").map(Number);
+    const [
+      wakeHour,
+      wakeMinute,
+    ] =
+      wakeTime
+        .split(":")
+        .map(Number);
 
     let sleepMinutes =
-      sleepHour * 60 + sleepMinute;
+      sleepHour * 60 +
+      sleepMinute;
 
     let wakeMinutes =
-      wakeHour * 60 + wakeMinute;
+      wakeHour * 60 +
+      wakeMinute;
 
-    // If wake time is next day
     if (wakeMinutes <= sleepMinutes) {
-      wakeMinutes += 24 * 60;
+      wakeMinutes +=
+        24 * 60;
     }
 
     const duration =
-      (wakeMinutes - sleepMinutes) / 60;
+      (wakeMinutes -
+        sleepMinutes) /
+      60;
 
-    return Number(duration.toFixed(1));
+    return Number(
+      duration.toFixed(1)
+    );
   };
 
-  const sleepHours = calculateSleepHours();
+  const sleepHours =
+    calculateSleepHours();
 
   // =========================================================
   // SLEEP SCORE
@@ -264,15 +484,24 @@ function App() {
       return 0;
     }
 
-    if (sleepHours >= 7 && sleepHours <= 9) {
+    if (
+      sleepHours >= 7 &&
+      sleepHours <= 9
+    ) {
       return 100;
     }
 
-    if (sleepHours >= 6 && sleepHours < 7) {
+    if (
+      sleepHours >= 6 &&
+      sleepHours < 7
+    ) {
       return 80;
     }
 
-    if (sleepHours > 9 && sleepHours <= 10) {
+    if (
+      sleepHours > 9 &&
+      sleepHours <= 10
+    ) {
       return 85;
     }
 
@@ -283,16 +512,21 @@ function App() {
     return 40;
   };
 
-  const sleepScore = calculateSleepScore();
+  const sleepScore =
+    calculateSleepScore();
 
   // =========================================================
-  // SCREEN TIME SCORE
+  // SCREEN SCORE
   // =========================================================
 
   const calculateScreenScore = () => {
-    const screen = Number(screenTime);
+    const screen =
+      Number(screenTime);
 
-    if (!screenTime || isNaN(screen)) {
+    if (
+      screenTime === "" ||
+      isNaN(screen)
+    ) {
       return 0;
     }
 
@@ -315,16 +549,21 @@ function App() {
     return 35;
   };
 
-  const screenScore = calculateScreenScore();
+  const screenScore =
+    calculateScreenScore();
 
   // =========================================================
   // STUDY / WORK SCORE
   // =========================================================
 
   const calculateStudyScore = () => {
-    const study = Number(studyTime);
+    const study =
+      Number(studyTime);
 
-    if (!studyTime || isNaN(study)) {
+    if (
+      studyTime === "" ||
+      isNaN(study)
+    ) {
       return 0;
     }
 
@@ -351,10 +590,11 @@ function App() {
     return 30;
   };
 
-  const studyScore = calculateStudyScore();
+  const studyScore =
+    calculateStudyScore();
 
   // =========================================================
-  // CHRONOAI PRODUCTIVITY SCORE
+  // PRODUCTIVITY SCORE
   // =========================================================
 
   let productivity = 0;
@@ -426,14 +666,17 @@ function App() {
 
   const loadSchedule = async () => {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/schedule`
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (data.success) {
-        setSchedule(data.schedule);
+        setSchedule(
+          data.schedule
+        );
       }
     } catch (error) {
       console.log(
@@ -448,40 +691,60 @@ function App() {
   // =========================================================
 
   const addSchedule = async () => {
-    if (!scheduleTime || !scheduleActivity.trim()) {
-      alert("Enter both time and activity");
+    if (
+      !scheduleTime ||
+      !scheduleActivity.trim()
+    ) {
+      alert(
+        "Enter both time and activity"
+      );
       return;
     }
 
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/schedule`,
         {
           method: "POST",
+
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
           },
+
           body: JSON.stringify({
             time: scheduleTime,
-            activity: scheduleActivity,
+            activity:
+              scheduleActivity,
           }),
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (data.success) {
-        setSchedule((previous) => [
-          ...previous,
-          data.schedule,
-        ]);
+        setSchedule(
+          (previous) => [
+            ...previous,
+            data.schedule,
+          ]
+        );
 
         setScheduleTime("");
         setScheduleActivity("");
+      } else {
+        alert(
+          data.message ||
+            "Could not add schedule"
+        );
       }
     } catch (error) {
       console.log(error);
-      alert("Backend is not running");
+
+      alert(
+        "Cannot connect to the backend."
+      );
     }
   };
 
@@ -491,20 +754,28 @@ function App() {
 
   const deleteSchedule = async (id) => {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/schedule/${id}`,
         {
           method: "DELETE",
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (data.success) {
-        setSchedule((previous) =>
-          previous.filter(
-            (item) => item.id !== id
-          )
+        setSchedule(
+          (previous) =>
+            previous.filter(
+              (item) =>
+                item.id !== id
+            )
+        );
+      } else {
+        alert(
+          data.message ||
+            "Could not delete schedule"
         );
       }
     } catch (error) {
@@ -518,30 +789,35 @@ function App() {
 
   const loadHabits = async () => {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/habits`
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (
         data.success &&
         data.habit
       ) {
         setSleepTime(
-          data.habit.sleep_time || ""
+          data.habit.sleep_time ||
+            ""
         );
 
         setWakeTime(
-          data.habit.wake_time || ""
+          data.habit.wake_time ||
+            ""
         );
 
         setScreenTime(
-          data.habit.screen_time ?? ""
+          data.habit.screen_time ??
+            ""
         );
 
         setStudyTime(
-          data.habit.study_time ?? ""
+          data.habit.study_time ??
+            ""
         );
 
         setHabitsSaved(true);
@@ -577,23 +853,34 @@ function App() {
     }
 
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/habits`,
         {
           method: "POST",
+
           headers: {
-            "Content-Type": "application/json",
+            "Content-Type":
+              "application/json",
           },
+
           body: JSON.stringify({
-            sleep_time: sleepTime,
-            wake_time: wakeTime,
-            screen_time: Number(screenTime),
-            study_time: Number(studyTime),
+            sleep_time:
+              sleepTime,
+
+            wake_time:
+              wakeTime,
+
+            screen_time:
+              Number(screenTime),
+
+            study_time:
+              Number(studyTime),
           }),
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (data.success) {
         setHabitsSaved(true);
@@ -609,8 +896,9 @@ function App() {
       }
     } catch (error) {
       console.log(error);
+
       alert(
-        "Backend is not running"
+        "Cannot connect to the backend."
       );
     }
   };
@@ -620,7 +908,9 @@ function App() {
   // =========================================================
 
   const formatTime = (time) => {
-    if (!time) return "";
+    if (!time) {
+      return "";
+    }
 
     const [hour, minute] =
       time.split(":");
@@ -643,7 +933,314 @@ function App() {
   };
 
   // =========================================================
-  // RENDER
+  // LOADING SCREEN
+  // =========================================================
+
+  if (checkingLogin) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#f7f4ff",
+          fontSize: "20px",
+          fontWeight: "700",
+          color: "#4f3c8d",
+        }}
+      >
+        Loading ChronoAI...
+      </div>
+    );
+  }
+
+  // =========================================================
+  // LOGIN / REGISTER SCREEN
+  // =========================================================
+
+  if (!user) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "30px",
+          boxSizing: "border-box",
+          background:
+            "linear-gradient(135deg, #f7f4ff 0%, #f9fbff 100%)",
+        }}
+      >
+        <div
+          style={{
+            width: "100%",
+            maxWidth: "430px",
+            background: "#ffffff",
+            borderRadius: "24px",
+            padding: "38px",
+            boxSizing: "border-box",
+            boxShadow:
+              "0 20px 60px rgba(30, 20, 70, 0.12)",
+          }}
+        >
+          <div
+            style={{
+              textAlign: "center",
+              fontSize: "31px",
+              fontWeight: "800",
+              marginBottom: "24px",
+            }}
+          >
+            <span
+              style={{
+                color: "#6d3df5",
+              }}
+            >
+              ✦
+            </span>{" "}
+            Chrono
+            <span
+              style={{
+                color: "#6d3df5",
+              }}
+            >
+              AI
+            </span>
+          </div>
+
+          <h1
+            style={{
+              textAlign: "center",
+              margin: "0",
+              fontSize: "30px",
+            }}
+          >
+            {authMode === "login"
+              ? "Welcome back"
+              : "Create your account"}
+          </h1>
+
+          <p
+            style={{
+              textAlign: "center",
+              color: "#777",
+              lineHeight: "1.5",
+              margin:
+                "10px 0 28px",
+            }}
+          >
+            {authMode === "login"
+              ? "Sign in to continue to your productivity planner."
+              : "Create an account to keep your ChronoAI data private."}
+          </p>
+
+          <form
+            onSubmit={
+              handleAuthSubmit
+            }
+          >
+            <label
+              style={{
+                display: "block",
+                fontWeight: "600",
+                marginBottom: "8px",
+              }}
+            >
+              Username
+            </label>
+
+            <input
+              type="text"
+              placeholder="Enter username"
+              value={authUsername}
+              onChange={(e) =>
+                setAuthUsername(
+                  e.target.value
+                )
+              }
+              autoComplete="username"
+              style={{
+                width: "100%",
+                boxSizing:
+                  "border-box",
+                padding:
+                  "14px 15px",
+                marginBottom:
+                  "18px",
+                border:
+                  "1px solid #ddd",
+                borderRadius:
+                  "12px",
+                outline: "none",
+                fontSize: "15px",
+              }}
+            />
+
+            <label
+              style={{
+                display: "block",
+                fontWeight: "600",
+                marginBottom: "8px",
+              }}
+            >
+              Password
+            </label>
+
+            <input
+              type="password"
+              placeholder="Enter password"
+              value={authPassword}
+              onChange={(e) =>
+                setAuthPassword(
+                  e.target.value
+                )
+              }
+              autoComplete={
+                authMode === "login"
+                  ? "current-password"
+                  : "new-password"
+              }
+              style={{
+                width: "100%",
+                boxSizing:
+                  "border-box",
+                padding:
+                  "14px 15px",
+                marginBottom:
+                  authMode === "register"
+                    ? "18px"
+                    : "22px",
+                border:
+                  "1px solid #ddd",
+                borderRadius:
+                  "12px",
+                outline: "none",
+                fontSize: "15px",
+              }}
+            />
+
+            {authMode ===
+              "register" && (
+              <>
+                <label
+                  style={{
+                    display: "block",
+                    fontWeight: "600",
+                    marginBottom:
+                      "8px",
+                  }}
+                >
+                  Confirm Password
+                </label>
+
+                <input
+                  type="password"
+                  placeholder="Re-enter password"
+                  value={
+                    authConfirmPassword
+                  }
+                  onChange={(e) =>
+                    setAuthConfirmPassword(
+                      e.target.value
+                    )
+                  }
+                  autoComplete="new-password"
+                  style={{
+                    width: "100%",
+                    boxSizing:
+                      "border-box",
+                    padding:
+                      "14px 15px",
+                    marginBottom:
+                      "22px",
+                    border:
+                      "1px solid #ddd",
+                    borderRadius:
+                      "12px",
+                    outline: "none",
+                    fontSize: "15px",
+                  }}
+                />
+              </>
+            )}
+
+            <button
+              type="submit"
+              disabled={authLoading}
+              style={{
+                width: "100%",
+                border: "none",
+                borderRadius: "13px",
+                padding: "14px",
+                background:
+                  "linear-gradient(135deg, #6d3df5, #8b5cf6)",
+                color: "#fff",
+                fontSize: "16px",
+                fontWeight: "700",
+                cursor: authLoading
+                  ? "not-allowed"
+                  : "pointer",
+                opacity: authLoading
+                  ? 0.65
+                  : 1,
+              }}
+            >
+              {authLoading
+                ? "Please wait..."
+                : authMode === "login"
+                  ? "Login"
+                  : "Create Account"}
+            </button>
+          </form>
+
+          <div
+            style={{
+              textAlign: "center",
+              marginTop: "22px",
+              color: "#777",
+              fontSize: "14px",
+            }}
+          >
+            {authMode === "login"
+              ? "New user? "
+              : "Already have an account? "}
+
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode(
+                  authMode === "login"
+                    ? "register"
+                    : "login"
+                );
+
+                setAuthPassword("");
+
+                setAuthConfirmPassword("");
+              }}
+              style={{
+                border: "none",
+                background: "none",
+                color: "#6d3df5",
+                fontWeight: "700",
+                cursor: "pointer",
+                padding: "0",
+              }}
+            >
+              {authMode === "login"
+                ? "Create an account"
+                : "Login"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================
+  // MAIN DASHBOARD
   // =========================================================
 
   return (
@@ -656,10 +1253,12 @@ function App() {
       <header className="navbar">
 
         <div className="logo">
-          <span>✦</span> Chrono<span>AI</span>
+          <span>✦</span> Chrono
+          <span>AI</span>
         </div>
 
         <nav>
+
           <a
             className="nav-active"
             href="#dashboard"
@@ -682,21 +1281,72 @@ function App() {
           <a href="#analytics">
             ▥ Analytics
           </a>
+
         </nav>
 
-        <div className="nav-profile">
+        <div
+          className="nav-profile"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+          }}
+        >
 
           <div className="bell">
             ♧
           </div>
 
-          <div className="profile">
-            P
+          <div
+            className="profile"
+            title={
+              user?.username ||
+              "User"
+            }
+          >
+            {(user?.username ||
+              "U")
+              .charAt(0)
+              .toUpperCase()}
           </div>
+
+          <span
+            style={{
+              fontWeight: "600",
+              fontSize: "14px",
+              color: "#333",
+            }}
+          >
+            {user?.username}
+          </span>
+
+          <button
+            onClick={
+              handleLogout
+            }
+            style={{
+              border: "none",
+              borderRadius: "9px",
+              padding:
+                "8px 12px",
+              background:
+                "#f1eff8",
+              cursor:
+                "pointer",
+              fontWeight: "600",
+              color: "#333",
+            }}
+          >
+            Logout
+          </button>
 
         </div>
 
       </header>
+
+      {/* ================================================= */}
+      {/* MAIN */}
+      {/* ================================================= */}
 
       <main
         className="main-container"
@@ -830,7 +1480,8 @@ function App() {
 
               <strong>
                 {habitsSaved
-                  ? productivity >= 70
+                  ? productivity >=
+                    70
                     ? "↑ Good"
                     : "↓ Needs improvement"
                   : "Enter habits"}
@@ -929,13 +1580,10 @@ function App() {
               </div>
 
               <div className="active-pill">
-
                 <span></span>
-
                 {activeTasks.length}
                 {" "}
                 Active
-
               </div>
 
             </div>
@@ -975,15 +1623,15 @@ function App() {
                   )
                 }
               >
-                <option>
+                <option value="High">
                   High
                 </option>
 
-                <option>
+                <option value="Medium">
                   Medium
                 </option>
 
-                <option>
+                <option value="Low">
                   Low
                 </option>
               </select>
@@ -1025,7 +1673,7 @@ function App() {
 
             </div>
 
-            {/* ACTIVE */}
+            {/* ACTIVE TASKS */}
 
             <div className="task-label">
               ACTIVE TASKS
@@ -1035,16 +1683,13 @@ function App() {
 
               {activeTasks.length ===
                 0 && (
-
                 <div className="empty">
                   🎉 All tasks completed!
                 </div>
-
               )}
 
               {activeTasks.map(
                 (task) => (
-
                   <div
                     className="task-row"
                     key={task.id}
@@ -1066,7 +1711,9 @@ function App() {
                     </div>
 
                     <div
-                      className={`priority ${task.priority.toLowerCase()}`}
+                      className={`priority ${String(
+                        task.priority
+                      ).toLowerCase()}`}
                     >
                       {task.priority}
                     </div>
@@ -1092,7 +1739,6 @@ function App() {
                     </button>
 
                   </div>
-
                 )
               )}
 
@@ -1112,7 +1758,6 @@ function App() {
 
               {completedTasks.length >
                 0 && (
-
                 <button
                   onClick={() =>
                     completedTasks.forEach(
@@ -1125,7 +1770,6 @@ function App() {
                 >
                   Clear All
                 </button>
-
               )}
 
             </div>
@@ -1134,7 +1778,6 @@ function App() {
 
               {completedTasks.map(
                 (task) => (
-
                   <div
                     className="task-row completed-row"
                     key={task.id}
@@ -1156,7 +1799,9 @@ function App() {
                     </div>
 
                     <div
-                      className={`priority ${task.priority.toLowerCase()}`}
+                      className={`priority ${String(
+                        task.priority
+                      ).toLowerCase()}`}
                     >
                       {task.priority}
                     </div>
@@ -1182,7 +1827,6 @@ function App() {
                     </button>
 
                   </div>
-
                 )
               )}
 
@@ -1223,7 +1867,8 @@ function App() {
                 style={{
                   display: "flex",
                   gap: "10px",
-                  marginBottom: "18px",
+                  marginBottom:
+                    "18px",
                 }}
               >
 
@@ -1238,7 +1883,8 @@ function App() {
                   style={{
                     width: "120px",
                     padding: "14px",
-                    borderRadius: "14px",
+                    borderRadius:
+                      "14px",
                     border:
                       "1px solid #ddd",
                     fontSize: "16px",
@@ -1266,7 +1912,8 @@ function App() {
                   style={{
                     flex: 1,
                     padding: "14px",
-                    borderRadius: "14px",
+                    borderRadius:
+                      "14px",
                     border:
                       "1px solid #ddd",
                     fontSize: "16px",
@@ -1280,11 +1927,13 @@ function App() {
                   style={{
                     width: "55px",
                     border: "none",
-                    borderRadius: "14px",
+                    borderRadius:
+                      "14px",
                     background:
                       "#f0f0f5",
                     fontSize: "22px",
-                    cursor: "pointer",
+                    cursor:
+                      "pointer",
                   }}
                 >
                   +
@@ -1295,68 +1944,69 @@ function App() {
               <div className="schedule-list">
 
                 {[...schedule]
-                  .sort((a, b) =>
-                    a.time.localeCompare(
-                      b.time
-                    )
+                  .sort(
+                    (a, b) =>
+                      a.time.localeCompare(
+                        b.time
+                      )
                   )
-                  .map((item, index) => (
-
-                    <div
-                      className="schedule-item"
-                      key={item.id}
-                    >
-
-                      <time>
-                        {formatTime(
-                          item.time
-                        )}
-                      </time>
-
-                      <span
-                        className={`dot ${
-                          index % 3 === 0
-                            ? "purple-dot"
-                            : index % 3 === 1
-                            ? "blue-dot"
-                            : "green-dot"
-                        }`}
-                      ></span>
-
-                      <b>
-                        {item.activity}
-                      </b>
-
-                      <button
-                        onClick={() =>
-                          deleteSchedule(
-                            item.id
-                          )
-                        }
-                        style={{
-                          border: "none",
-                          background:
-                            "transparent",
-                          cursor:
-                            "pointer",
-                          fontSize:
-                            "15px",
-                        }}
+                  .map(
+                    (item, index) => (
+                      <div
+                        className="schedule-item"
+                        key={item.id}
                       >
-                        🗑
-                      </button>
 
-                    </div>
+                        <time>
+                          {formatTime(
+                            item.time
+                          )}
+                        </time>
 
-                  ))}
+                        <span
+                          className={`dot ${
+                            index % 3 ===
+                            0
+                              ? "purple-dot"
+                              : index % 3 ===
+                                  1
+                                ? "blue-dot"
+                                : "green-dot"
+                          }`}
+                        ></span>
+
+                        <b>
+                          {item.activity}
+                        </b>
+
+                        <button
+                          onClick={() =>
+                            deleteSchedule(
+                              item.id
+                            )
+                          }
+                          style={{
+                            border: "none",
+                            background:
+                              "transparent",
+                            cursor:
+                              "pointer",
+                            fontSize:
+                              "15px",
+                          }}
+                        >
+                          🗑
+                        </button>
+
+                      </div>
+                    )
+                  )}
 
                 {schedule.length ===
                   0 && (
-
                   <div className="empty">
                     Add today's schedule.
                   </div>
-
                 )}
 
               </div>
@@ -1607,29 +2257,26 @@ function App() {
 
               {sleepTime &&
                 wakeTime && (
-
-                <div
-                  style={{
-                    marginTop:
-                      "18px",
-                    padding:
-                      "14px",
-                    borderRadius:
-                      "14px",
-                    background:
-                      "#f6f3ff",
-                    textAlign:
-                      "center",
-                  }}
-                >
-                  😴 Sleep Duration:
-                  {" "}
-                  <strong>
-                    {sleepHours} hours
-                  </strong>
-                </div>
-
-              )}
+                  <div
+                    style={{
+                      marginTop:
+                        "18px",
+                      padding:
+                        "14px",
+                      borderRadius:
+                        "14px",
+                      background:
+                        "#f6f3ff",
+                      textAlign:
+                        "center",
+                    }}
+                  >
+                    😴 Sleep Duration:{" "}
+                    <strong>
+                      {sleepHours} hours
+                    </strong>
+                  </div>
+                )}
 
               {/* SAVE */}
 
@@ -1665,7 +2312,6 @@ function App() {
               {/* HABIT SCORES */}
 
               {habitsSaved && (
-
                 <div
                   style={{
                     marginTop:
@@ -1676,39 +2322,34 @@ function App() {
                 >
 
                   <div>
-                    Task Completion:
-                    {" "}
+                    Task Completion:{" "}
                     <strong>
                       {taskCompletion}%
                     </strong>
                   </div>
 
                   <div>
-                    Sleep Score:
-                    {" "}
+                    Sleep Score:{" "}
                     <strong>
                       {sleepScore}%
                     </strong>
                   </div>
 
                   <div>
-                    Screen Efficiency:
-                    {" "}
+                    Screen Efficiency:{" "}
                     <strong>
                       {screenScore}%
                     </strong>
                   </div>
 
                   <div>
-                    Study / Work:
-                    {" "}
+                    Study / Work:{" "}
                     <strong>
                       {studyScore}%
                     </strong>
                   </div>
 
                 </div>
-
               )}
 
             </section>
