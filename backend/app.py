@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 from pymongo import MongoClient
 from bson.objectid import ObjectId
+from upstash_redis import Redis
 from werkzeug.security import generate_password_hash, check_password_hash
 
 
@@ -126,6 +127,36 @@ tasks_collection = db["tasks"]
 schedule_collection = db["schedules"]
 
 habits_collection = db["daily_habits"]
+
+
+# ==================================================
+# REDIS (UPSTASH)
+# ==================================================
+# Set both values in Render -> Environment. Never hardcode the token.
+# Surrounding quotes and whitespace are removed defensively if they were
+# accidentally copied into the Render value fields.
+
+def _read_env_value(name):
+    value = os.environ.get(name, "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
+        value = value[1:-1].strip()
+    return value
+
+
+UPSTASH_REDIS_REST_URL = _read_env_value("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = _read_env_value("UPSTASH_REDIS_REST_TOKEN")
+
+redis_client = None
+
+if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+    try:
+        redis_client = Redis(
+            url=UPSTASH_REDIS_REST_URL,
+            token=UPSTASH_REDIS_REST_TOKEN,
+        )
+    except Exception:
+        app.logger.exception("Could not initialize the Upstash Redis client")
+        redis_client = None
 
 
 # ==================================================
@@ -1474,6 +1505,45 @@ def get_habits():
             "message":
                 str(e)
 
+        }), 500
+
+
+# ==================================================
+# REDIS HEALTH CHECK
+# ==================================================
+
+@app.route("/api/redis-health", methods=["GET"])
+def redis_health():
+    """Verify that the deployed backend can reach Upstash Redis."""
+    if redis_client is None:
+        return jsonify({
+            "success": False,
+            "redis": False,
+            "message": "Redis is not configured. Check Render environment variables."
+        }), 503
+
+    try:
+        result = redis_client.ping()
+        result_text = str(result).strip().upper()
+        connected = result is True or result_text in {"PONG", "TRUE"}
+
+        return jsonify({
+            "success": connected,
+            "redis": connected,
+            "message": (
+                "Redis connection is working"
+                if connected
+                else "Redis ping returned an unexpected response"
+            )
+        }), 200 if connected else 500
+
+    except Exception:
+        # Keep credentials and service details out of the HTTP response.
+        app.logger.exception("Redis connection test failed")
+        return jsonify({
+            "success": False,
+            "redis": False,
+            "message": "Redis connection failed. Check the Upstash URL/token and Render logs."
         }), 500
 
 
