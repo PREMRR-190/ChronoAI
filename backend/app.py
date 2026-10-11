@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, session
@@ -132,31 +133,18 @@ habits_collection = db["daily_habits"]
 # ==================================================
 # REDIS (UPSTASH)
 # ==================================================
-# Set both values in Render -> Environment. Never hardcode the token.
-# Surrounding quotes and whitespace are removed defensively if they were
-# accidentally copied into the Render value fields.
+# Configure these in Render Environment. Never hardcode the token.
 
-def _read_env_value(name):
-    value = os.environ.get(name, "").strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("\"", "'"):
-        value = value[1:-1].strip()
-    return value
-
-
-UPSTASH_REDIS_REST_URL = _read_env_value("UPSTASH_REDIS_REST_URL")
-UPSTASH_REDIS_REST_TOKEN = _read_env_value("UPSTASH_REDIS_REST_TOKEN")
+UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 
 redis_client = None
 
 if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-    try:
-        redis_client = Redis(
-            url=UPSTASH_REDIS_REST_URL,
-            token=UPSTASH_REDIS_REST_TOKEN,
-        )
-    except Exception:
-        app.logger.exception("Could not initialize the Upstash Redis client")
-        redis_client = None
+    redis_client = Redis(
+        url=UPSTASH_REDIS_REST_URL,
+        token=UPSTASH_REDIS_REST_TOKEN
+    )
 
 
 # ==================================================
@@ -208,6 +196,146 @@ def object_id(value):
 
 def utc_now():
     return datetime.now(timezone.utc)
+
+
+def task_to_api_dict(task):
+    """Convert a MongoDB task document into the format used by React/Redis."""
+    return {
+        "id": str(task["_id"]),
+        "title": task.get("title", ""),
+        "priority": task.get("priority", "Medium"),
+        "hours": task.get("hours", 1),
+        "completed": task.get("completed", False),
+    }
+
+
+def redis_tasks_key(user_id):
+    """Use a separate Redis key for every user."""
+    return f"chronoai:user:{user_id}:tasks"
+
+
+def sync_user_tasks_to_redis(user_id):
+    """Mirror one user's current MongoDB tasks into Redis as a JSON array.
+
+    MongoDB remains the permanent source of truth. The Redis mirror is refreshed
+    after task create/update/delete and when the frontend loads task data.
+    """
+    if redis_client is None:
+        app.logger.warning("Redis is not configured; task mirror was not updated")
+        return False
+
+    try:
+        documents = list(
+            tasks_collection.find({"user_id": str(user_id)}).sort("created_at", -1)
+        )
+        payload = [task_to_api_dict(task) for task in documents]
+        redis_client.set(
+            redis_tasks_key(user_id),
+            json.dumps(payload, separators=(",", ":"))
+        )
+        return True
+    except Exception:
+        app.logger.exception("Could not sync tasks to Redis for user %s", user_id)
+        return False
+
+
+def redis_schedules_key(user_id):
+    """A separate Redis list for each logged-in user's schedules."""
+    return f"chronoai:user:{user_id}:schedules"
+
+
+def redis_habits_key(user_id):
+    """A separate Redis list for each logged-in user's saved habit history."""
+    return f"chronoai:user:{user_id}:habits"
+
+
+def schedule_to_api_dict(item):
+    return {
+        "id": str(item["_id"]),
+        "time": item.get("time", ""),
+        "activity": item.get("activity", ""),
+    }
+
+
+def habit_to_redis_dict(habit):
+    created_at = habit.get("created_at")
+    if hasattr(created_at, "isoformat"):
+        created_at = created_at.isoformat()
+    elif created_at is not None:
+        created_at = str(created_at)
+
+    return {
+        "id": str(habit["_id"]),
+        "sleep_time": habit.get("sleep_time", ""),
+        "wake_time": habit.get("wake_time", ""),
+        "screen_time": habit.get("screen_time", 0),
+        "study_time": habit.get("study_time", 0),
+        "created_at": created_at,
+    }
+
+
+def sync_user_schedules_to_redis(user_id):
+    """Mirror every schedule belonging to this user; MongoDB is authoritative."""
+    if redis_client is None:
+        return False
+
+    try:
+        documents = list(
+            schedule_collection.find({"user_id": str(user_id)}).sort("created_at", 1)
+        )
+        payload = [schedule_to_api_dict(item) for item in documents]
+        redis_client.set(
+            redis_schedules_key(user_id),
+            json.dumps(payload, separators=(",", ":"))
+        )
+        return True
+    except Exception:
+        app.logger.exception("Could not sync schedules to Redis for user %s", user_id)
+        return False
+
+
+def sync_user_habits_to_redis(user_id):
+    """Mirror all saved habit records belonging to this user."""
+    if redis_client is None:
+        return False
+
+    try:
+        documents = list(
+            habits_collection.find({"user_id": str(user_id)}).sort("created_at", -1)
+        )
+        payload = [habit_to_redis_dict(item) for item in documents]
+        redis_client.set(
+            redis_habits_key(user_id),
+            json.dumps(payload, separators=(",", ":"))
+        )
+        return True
+    except Exception:
+        app.logger.exception("Could not sync habits to Redis for user %s", user_id)
+        return False
+
+
+def sync_all_user_data_to_redis(user_id):
+    """Create/refresh this user's task, schedule, and habit mirrors in Redis.
+
+    This runs on login/registration and the individual endpoints also refresh
+    the corresponding mirror after changes. User accounts/password hashes stay
+    in MongoDB and are deliberately not copied to Redis.
+    """
+    return {
+        "tasks": sync_user_tasks_to_redis(user_id),
+        "schedules": sync_user_schedules_to_redis(user_id),
+        "habits": sync_user_habits_to_redis(user_id),
+    }
+
+
+def read_redis_json(key, fallback):
+    """Read and parse a JSON value saved by one of the sync helpers."""
+    raw_value = redis_client.get(key)
+    if raw_value is None:
+        return fallback
+    if isinstance(raw_value, bytes):
+        raw_value = raw_value.decode("utf-8")
+    return json.loads(raw_value) if isinstance(raw_value, str) else raw_value
 
 
 # ==================================================
@@ -345,15 +473,14 @@ def register():
 
         session.permanent = True
 
+        redis_sync = sync_all_user_data_to_redis(session["user_id"])
 
         return jsonify({
-
             "success": True,
-
             "message": "Account created successfully",
-
-            "user": serialize_user(user)
-
+            "user": serialize_user(user),
+            "redis_synced": all(redis_sync.values()),
+            "redis_sync": redis_sync,
         }), 201
 
 
@@ -464,15 +591,14 @@ def login():
 
         session.permanent = True
 
+        redis_sync = sync_all_user_data_to_redis(session["user_id"])
 
         return jsonify({
-
             "success": True,
-
             "message": "Login successful",
-
-            "user": serialize_user(user)
-
+            "user": serialize_user(user),
+            "redis_synced": all(redis_sync.values()),
+            "redis_sync": redis_sync,
         }), 200
 
 
@@ -613,898 +739,464 @@ def test_auth():
 
 
 # ==================================================
-# TASKS
+# TASKS — MONGODB + REDIS MIRROR
 # ==================================================
 
 @app.route("/api/tasks", methods=["POST"])
 def add_task():
-
     auth = login_required()
-
     if auth:
         return auth
 
-
     try:
-
         data = request.get_json(silent=True) or {}
-
-
-        title = str(
-            data.get("title", "")
-        ).strip()
-
-
-        priority = str(
-            data.get("priority", "Medium")
-        )
-
-
-        hours = data.get(
-            "hours",
-            1
-        )
-
+        title = str(data.get("title", "")).strip()
+        priority = str(data.get("priority", "Medium"))
+        hours = data.get("hours", 1)
 
         if not title:
-
             return jsonify({
-
                 "success": False,
-
-                "message":
-                    "Task title is required"
-
+                "message": "Task title is required"
             }), 400
-
-
-        # Validate hours
 
         try:
             hours = float(hours)
-
         except (TypeError, ValueError):
-
             return jsonify({
-
                 "success": False,
-
-                "message":
-                    "Hours must be a number"
-
+                "message": "Hours must be a number"
             }), 400
 
-
         task = {
-
-            # Every task belongs to one user
-            "user_id":
-                current_user_id(),
-
-            "title":
-                title,
-
-            "priority":
-                priority,
-
-            "hours":
-                hours,
-
-            "completed":
-                False,
-
-            "created_at":
-                utc_now()
+            "user_id": str(current_user_id()),
+            "title": title,
+            "priority": priority,
+            "hours": hours,
+            "completed": False,
+            "created_at": utc_now(),
         }
 
-
         result = tasks_collection.insert_one(task)
-
+        task["_id"] = result.inserted_id
+        redis_synced = sync_user_tasks_to_redis(current_user_id())
 
         return jsonify({
-
             "success": True,
-
-            "task": {
-
-                "id":
-                    str(result.inserted_id),
-
-                "title":
-                    title,
-
-                "priority":
-                    priority,
-
-                "hours":
-                    hours,
-
-                "completed":
-                    False
-
-            }
-
+            "message": (
+                "Task saved to MongoDB and Redis"
+                if redis_synced
+                else "Task saved to MongoDB, but Redis sync failed; check Render logs"
+            ),
+            "redis_synced": redis_synced,
+            "task": task_to_api_dict(task),
         }), 201
 
-
     except Exception as e:
+        app.logger.exception("Could not add task")
+        return jsonify({"success": False, "message": str(e)}), 500
 
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
-
-
-# ==================================================
-# GET TASKS
-# ==================================================
 
 @app.route("/api/tasks", methods=["GET"])
 def get_tasks():
-
     auth = login_required()
-
     if auth:
         return auth
 
-
     try:
-
-        tasks = list(
-
-            tasks_collection.find({
-
-                "user_id":
-                    current_user_id()
-
-            }).sort(
-
-                "created_at",
-                -1
-
-            )
-
+        documents = list(
+            tasks_collection.find({"user_id": str(current_user_id())})
+            .sort("created_at", -1)
         )
-
-
-        result = []
-
-
-        for task in tasks:
-
-            result.append({
-
-                "id":
-                    str(task["_id"]),
-
-                "title":
-                    task.get(
-                        "title",
-                        ""
-                    ),
-
-                "priority":
-                    task.get(
-                        "priority",
-                        "Medium"
-                    ),
-
-                "hours":
-                    task.get(
-                        "hours",
-                        1
-                    ),
-
-                "completed":
-                    task.get(
-                        "completed",
-                        False
-                    )
-
-            })
-
+        result = [task_to_api_dict(task) for task in documents]
+        # Refresh Redis from MongoDB so existing tasks are mirrored after login.
+        redis_synced = sync_user_tasks_to_redis(current_user_id())
 
         return jsonify({
-
             "success": True,
-
-            "tasks":
-                result
-
+            "tasks": result,
+            "redis_synced": redis_synced,
         }), 200
 
-
     except Exception as e:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
+        app.logger.exception("Could not load tasks")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ==================================================
-# UPDATE TASK
-# ==================================================
-
-@app.route(
-    "/api/tasks/<task_id>",
-    methods=["PUT"]
-)
+@app.route("/api/tasks/<task_id>", methods=["PUT"])
 def update_task(task_id):
-
     auth = login_required()
-
     if auth:
         return auth
 
-
     oid = object_id(task_id)
-
-
     if oid is None:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                "Invalid task ID"
-
-        }), 400
-
+        return jsonify({"success": False, "message": "Invalid task ID"}), 400
 
     try:
-
-        data = request.get_json(
-            silent=True
-        ) or {}
-
-
-        completed = bool(
-            data.get(
-                "completed",
-                False
-            )
-        )
-
+        data = request.get_json(silent=True) or {}
+        completed = bool(data.get("completed", False))
 
         result = tasks_collection.update_one(
-
-            {
-                "_id": oid,
-                "user_id":
-                    current_user_id()
-            },
-
-            {
-                "$set": {
-                    "completed":
-                        completed
-                }
-            }
-
+            {"_id": oid, "user_id": str(current_user_id())},
+            {"$set": {"completed": completed}}
         )
-
 
         if result.matched_count == 0:
+            return jsonify({"success": False, "message": "Task not found"}), 404
 
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Task not found"
-
-            }), 404
-
-
+        redis_synced = sync_user_tasks_to_redis(current_user_id())
         return jsonify({
-
             "success": True,
-
-            "message":
-                "Task updated successfully"
-
+            "message": (
+                "Task updated in MongoDB and Redis"
+                if redis_synced
+                else "Task updated in MongoDB, but Redis sync failed; check Render logs"
+            ),
+            "redis_synced": redis_synced,
         }), 200
 
-
     except Exception as e:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
+        app.logger.exception("Could not update task")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ==================================================
-# DELETE TASK
-# ==================================================
-
-@app.route(
-    "/api/tasks/<task_id>",
-    methods=["DELETE"]
-)
+@app.route("/api/tasks/<task_id>", methods=["DELETE"])
 def delete_task(task_id):
-
     auth = login_required()
-
     if auth:
         return auth
-
 
     oid = object_id(task_id)
-
-
     if oid is None:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                "Invalid task ID"
-
-        }), 400
-
+        return jsonify({"success": False, "message": "Invalid task ID"}), 400
 
     try:
-
         result = tasks_collection.delete_one({
-
             "_id": oid,
-
-            "user_id":
-                current_user_id()
-
+            "user_id": str(current_user_id()),
         })
 
-
         if result.deleted_count == 0:
+            return jsonify({"success": False, "message": "Task not found"}), 404
 
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Task not found"
-
-            }), 404
-
-
+        # Rebuild the user's Redis task array after deletion. If it was the last
+        # task, Redis will hold an empty JSON array: [].
+        redis_synced = sync_user_tasks_to_redis(current_user_id())
         return jsonify({
-
             "success": True,
-
-            "message":
-                "Task deleted successfully"
-
+            "message": (
+                "Task deleted from MongoDB and Redis"
+                if redis_synced
+                else "Task deleted from MongoDB, but Redis sync failed; check Render logs"
+            ),
+            "redis_synced": redis_synced,
         }), 200
 
-
     except Exception as e:
+        app.logger.exception("Could not delete task")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/redis-tasks", methods=["GET"])
+def get_redis_tasks():
+    """Authenticated endpoint to inspect the current user's Redis task mirror."""
+    auth = login_required()
+    if auth:
+        return auth
+
+    if redis_client is None:
+        return jsonify({
+            "success": False,
+            "redis": False,
+            "message": "Redis is not configured",
+        }), 503
+
+    key = redis_tasks_key(current_user_id())
+    try:
+        raw_value = redis_client.get(key)
+        if raw_value is None:
+            tasks = []
+            cache_exists = False
+        else:
+            if isinstance(raw_value, bytes):
+                raw_value = raw_value.decode("utf-8")
+            tasks = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+            cache_exists = True
 
         return jsonify({
-
+            "success": True,
+            "redis": True,
+            "key": key,
+            "cache_exists": cache_exists,
+            "tasks": tasks,
+        }), 200
+    except Exception:
+        app.logger.exception("Could not read task mirror from Redis")
+        return jsonify({
             "success": False,
-
-            "message":
-                str(e)
-
+            "redis": False,
+            "message": "Could not read tasks from Redis; check Render logs",
         }), 500
 
 
 # ==================================================
-# SCHEDULE
+# SCHEDULE — MONGODB + REDIS MIRROR
 # ==================================================
 
-@app.route(
-    "/api/schedule",
-    methods=["POST"]
-)
+@app.route("/api/schedule", methods=["POST"])
 def add_schedule():
-
     auth = login_required()
-
     if auth:
         return auth
 
-
     try:
-
-        data = request.get_json(
-            silent=True
-        ) or {}
-
-
-        time = str(
-            data.get("time", "")
-        ).strip()
-
-
-        activity = str(
-            data.get("activity", "")
-        ).strip()
-
+        data = request.get_json(silent=True) or {}
+        time = str(data.get("time", "")).strip()
+        activity = str(data.get("activity", "")).strip()
 
         if not time or not activity:
-
             return jsonify({
-
                 "success": False,
-
-                "message":
-                    "Time and activity are required"
-
+                "message": "Time and activity are required"
             }), 400
-
 
         schedule = {
-
-            "user_id":
-                current_user_id(),
-
-            "time":
-                time,
-
-            "activity":
-                activity,
-
-            "created_at":
-                utc_now()
-
+            "user_id": str(current_user_id()),
+            "time": time,
+            "activity": activity,
+            "created_at": utc_now(),
         }
-
-
-        result = schedule_collection.insert_one(
-            schedule
-        )
-
+        result = schedule_collection.insert_one(schedule)
+        schedule["_id"] = result.inserted_id
+        redis_synced = sync_user_schedules_to_redis(current_user_id())
 
         return jsonify({
-
             "success": True,
-
-            "schedule": {
-
-                "id":
-                    str(result.inserted_id),
-
-                "time":
-                    time,
-
-                "activity":
-                    activity
-
-            }
-
+            "message": (
+                "Schedule saved to MongoDB and Redis"
+                if redis_synced else
+                "Schedule saved to MongoDB, but Redis sync failed; check Render logs"
+            ),
+            "redis_synced": redis_synced,
+            "schedule": schedule_to_api_dict(schedule),
         }), 201
 
-
     except Exception as e:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
+        app.logger.exception("Could not add schedule")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ==================================================
-# GET SCHEDULE
-# ==================================================
-
-@app.route(
-    "/api/schedule",
-    methods=["GET"]
-)
+@app.route("/api/schedule", methods=["GET"])
 def get_schedule():
-
     auth = login_required()
-
     if auth:
         return auth
-
 
     try:
-
-        schedules = list(
-
-            schedule_collection.find({
-
-                "user_id":
-                    current_user_id()
-
-            }).sort(
-
-                "created_at",
-                1
-
-            )
-
+        documents = list(
+            schedule_collection.find({"user_id": str(current_user_id())})
+            .sort("created_at", 1)
         )
-
-
-        result = []
-
-
-        for item in schedules:
-
-            result.append({
-
-                "id":
-                    str(item["_id"]),
-
-                "time":
-                    item.get(
-                        "time",
-                        ""
-                    ),
-
-                "activity":
-                    item.get(
-                        "activity",
-                        ""
-                    )
-
-            })
-
+        result = [schedule_to_api_dict(item) for item in documents]
+        # Each user's existing data is mirrored when they sign in/load the page.
+        redis_synced = sync_user_schedules_to_redis(current_user_id())
 
         return jsonify({
-
             "success": True,
-
-            "schedule":
-                result
-
+            "schedule": result,
+            "redis_synced": redis_synced,
         }), 200
 
-
     except Exception as e:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
+        app.logger.exception("Could not load schedule")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ==================================================
-# DELETE SCHEDULE
-# ==================================================
-
-@app.route(
-    "/api/schedule/<schedule_id>",
-    methods=["DELETE"]
-)
+@app.route("/api/schedule/<schedule_id>", methods=["DELETE"])
 def delete_schedule(schedule_id):
-
     auth = login_required()
-
     if auth:
         return auth
-
 
     oid = object_id(schedule_id)
-
-
     if oid is None:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                "Invalid schedule ID"
-
-        }), 400
-
+        return jsonify({"success": False, "message": "Invalid schedule ID"}), 400
 
     try:
-
         result = schedule_collection.delete_one({
-
             "_id": oid,
-
-            "user_id":
-                current_user_id()
-
+            "user_id": str(current_user_id()),
         })
-
-
         if result.deleted_count == 0:
+            return jsonify({"success": False, "message": "Schedule not found"}), 404
 
-            return jsonify({
-
-                "success": False,
-
-                "message":
-                    "Schedule not found"
-
-            }), 404
-
-
+        redis_synced = sync_user_schedules_to_redis(current_user_id())
         return jsonify({
-
             "success": True,
-
-            "message":
-                "Schedule deleted successfully"
-
+            "message": (
+                "Schedule deleted from MongoDB and Redis"
+                if redis_synced else
+                "Schedule deleted from MongoDB, but Redis sync failed; check Render logs"
+            ),
+            "redis_synced": redis_synced,
         }), 200
 
-
     except Exception as e:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
+        app.logger.exception("Could not delete schedule")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 # ==================================================
-# DAILY HABITS
+# DAILY HABITS — MONGODB + REDIS MIRROR
 # ==================================================
 
-@app.route(
-    "/api/habits",
-    methods=["POST"]
-)
+@app.route("/api/habits", methods=["POST"])
 def save_habits():
-
     auth = login_required()
-
     if auth:
         return auth
 
-
     try:
-
-        data = request.get_json(
-            silent=True
-        ) or {}
-
-
-        sleep_time = str(
-            data.get(
-                "sleep_time",
-                ""
-            )
-        ).strip()
-
-
-        wake_time = str(
-            data.get(
-                "wake_time",
-                ""
-            )
-        ).strip()
-
-
-        screen_time = data.get(
-            "screen_time",
-            0
-        )
-
-
-        study_time = data.get(
-            "study_time",
-            0
-        )
-
+        data = request.get_json(silent=True) or {}
+        sleep_time = str(data.get("sleep_time", "")).strip()
+        wake_time = str(data.get("wake_time", "")).strip()
+        screen_time = data.get("screen_time", 0)
+        study_time = data.get("study_time", 0)
 
         if not sleep_time or not wake_time:
-
             return jsonify({
-
                 "success": False,
-
-                "message":
-                    "Sleep and wake-up time are required"
-
+                "message": "Sleep and wake-up time are required"
             }), 400
-
 
         try:
-
             screen_time = float(screen_time)
             study_time = float(study_time)
-
         except (TypeError, ValueError):
-
             return jsonify({
-
                 "success": False,
-
-                "message":
-                    "Screen time and study time must be numbers"
-
+                "message": "Screen time and study time must be numbers"
             }), 400
 
-
         habit = {
-
-            "user_id":
-                current_user_id(),
-
-            "sleep_time":
-                sleep_time,
-
-            "wake_time":
-                wake_time,
-
-            "screen_time":
-                screen_time,
-
-            "study_time":
-                study_time,
-
-            "created_at":
-                utc_now()
-
+            "user_id": str(current_user_id()),
+            "sleep_time": sleep_time,
+            "wake_time": wake_time,
+            "screen_time": screen_time,
+            "study_time": study_time,
+            "created_at": utc_now(),
         }
-
-
-        result = habits_collection.insert_one(
-            habit
-        )
-
+        result = habits_collection.insert_one(habit)
+        habit["_id"] = result.inserted_id
+        redis_synced = sync_user_habits_to_redis(current_user_id())
 
         return jsonify({
-
             "success": True,
-
-            "message":
-                "Daily habits saved successfully",
-
-            "habit": {
-
-                "id":
-                    str(result.inserted_id),
-
-                "sleep_time":
-                    sleep_time,
-
-                "wake_time":
-                    wake_time,
-
-                "screen_time":
-                    screen_time,
-
-                "study_time":
-                    study_time
-
-            }
-
+            "message": (
+                "Daily habits saved to MongoDB and Redis"
+                if redis_synced else
+                "Daily habits saved to MongoDB, but Redis sync failed; check Render logs"
+            ),
+            "redis_synced": redis_synced,
+            "habit": habit_to_redis_dict(habit),
         }), 201
 
-
     except Exception as e:
-
-        return jsonify({
-
-            "success": False,
-
-            "message":
-                str(e)
-
-        }), 500
+        app.logger.exception("Could not save daily habits")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
-# ==================================================
-# GET HABITS
-# ==================================================
-
-@app.route(
-    "/api/habits",
-    methods=["GET"]
-)
+@app.route("/api/habits", methods=["GET"])
 def get_habits():
-
     auth = login_required()
-
     if auth:
         return auth
 
-
     try:
-
         habit = habits_collection.find_one(
-
-            {
-                "user_id":
-                    current_user_id()
-            },
-
-            sort=[
-                (
-                    "created_at",
-                    -1
-                )
-            ]
-
+            {"user_id": str(current_user_id())},
+            sort=[("created_at", -1)]
         )
-
+        # Mirror the user's complete habit history; API still returns latest habit
+        # in the shape the current React frontend expects.
+        redis_synced = sync_user_habits_to_redis(current_user_id())
 
         if not habit:
-
             return jsonify({
-
                 "success": True,
-
-                "habit": None
-
+                "habit": None,
+                "redis_synced": redis_synced,
             }), 200
 
-
         return jsonify({
-
             "success": True,
-
             "habit": {
-
-                "id":
-                    str(habit["_id"]),
-
-                "sleep_time":
-                    habit.get(
-                        "sleep_time",
-                        ""
-                    ),
-
-                "wake_time":
-                    habit.get(
-                        "wake_time",
-                        ""
-                    ),
-
-                "screen_time":
-                    habit.get(
-                        "screen_time",
-                        0
-                    ),
-
-                "study_time":
-                    habit.get(
-                        "study_time",
-                        0
-                    )
-
-            }
-
+                "id": str(habit["_id"]),
+                "sleep_time": habit.get("sleep_time", ""),
+                "wake_time": habit.get("wake_time", ""),
+                "screen_time": habit.get("screen_time", 0),
+                "study_time": habit.get("study_time", 0),
+            },
+            "redis_synced": redis_synced,
         }), 200
 
-
     except Exception as e:
+        app.logger.exception("Could not load daily habits")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+# ==================================================
+# REDIS DATA INSPECTION — CURRENT USER ONLY
+# ==================================================
+
+@app.route("/api/redis-data", methods=["GET"])
+def get_redis_data():
+    auth = login_required()
+    if auth:
+        return auth
+
+    if redis_client is None:
+        return jsonify({
+            "success": False,
+            "redis": False,
+            "message": "Redis is not configured",
+        }), 503
+
+    user_id = str(current_user_id())
+    try:
+        # Refresh each mirror from MongoDB first so this endpoint also repairs
+        # any cache missed during a previous outage.
+        sync_status = sync_all_user_data_to_redis(user_id)
+
+        tasks = read_redis_json(redis_tasks_key(user_id), [])
+        schedules = read_redis_json(redis_schedules_key(user_id), [])
+        habits = read_redis_json(redis_habits_key(user_id), [])
 
         return jsonify({
+            "success": True,
+            "redis": True,
+            "user_id": user_id,
+            "keys": {
+                "tasks": redis_tasks_key(user_id),
+                "schedules": redis_schedules_key(user_id),
+                "habits": redis_habits_key(user_id),
+            },
+            "redis_synced": all(sync_status.values()),
+            "sync_status": sync_status,
+            "data": {
+                "tasks": tasks,
+                "schedules": schedules,
+                "habits": habits,
+            },
+        }), 200
 
+    except Exception:
+        app.logger.exception("Could not read current user's Redis data")
+        return jsonify({
             "success": False,
-
-            "message":
-                str(e)
-
+            "redis": False,
+            "message": "Could not read Redis data; check Render logs",
         }), 500
 
 
@@ -1514,18 +1206,16 @@ def get_habits():
 
 @app.route("/api/redis-health", methods=["GET"])
 def redis_health():
-    """Verify that the deployed backend can reach Upstash Redis."""
     if redis_client is None:
         return jsonify({
             "success": False,
             "redis": False,
-            "message": "Redis is not configured. Check Render environment variables."
+            "message": "Redis is not configured"
         }), 503
 
     try:
         result = redis_client.ping()
-        result_text = str(result).strip().upper()
-        connected = result is True or result_text in {"PONG", "TRUE"}
+        connected = result is True or str(result).upper() == "PONG"
 
         return jsonify({
             "success": connected,
@@ -1535,15 +1225,14 @@ def redis_health():
                 if connected
                 else "Redis ping returned an unexpected response"
             )
-        }), 200 if connected else 500
+        }), (200 if connected else 500)
 
     except Exception:
-        # Keep credentials and service details out of the HTTP response.
-        app.logger.exception("Redis connection test failed")
+        app.logger.exception("Redis connection failed")
         return jsonify({
             "success": False,
             "redis": False,
-            "message": "Redis connection failed. Check the Upstash URL/token and Render logs."
+            "message": "Redis connection failed; check Render environment variables"
         }), 500
 
 
