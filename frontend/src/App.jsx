@@ -15,19 +15,151 @@ const apiFetch = (url, options = {}) => {
   });
 };
 
+// When the login screen is disabled, each browser profile gets its own
+// automatically-created guest account. This keeps the existing protected
+// Flask endpoints and per-user MongoDB/Redis data separation working.
+const GUEST_CREDENTIALS_KEY = "chronoai_guest_credentials_v1";
+
+const makeGuestCredentials = () => {
+  const randomPart =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID().replace(/-/g, "")
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+
+  return {
+    username: `guest_${randomPart.slice(0, 20)}`,
+    password: `G!${randomPart}${randomPart.slice(0, 8)}Z9`,
+  };
+};
+
+const readGuestCredentials = () => {
+  try {
+    const raw = window.localStorage.getItem(GUEST_CREDENTIALS_KEY);
+    if (!raw) return null;
+
+    const credentials = JSON.parse(raw);
+    if (credentials?.username && credentials?.password) {
+      return credentials;
+    }
+  } catch (error) {
+    console.warn("Could not read saved guest credentials:", error);
+  }
+
+  return null;
+};
+
+const saveGuestCredentials = (credentials) => {
+  try {
+    window.localStorage.setItem(
+      GUEST_CREDENTIALS_KEY,
+      JSON.stringify(credentials)
+    );
+  } catch (error) {
+    console.warn("Could not save guest credentials:", error);
+  }
+};
+
+const removeGuestCredentials = () => {
+  try {
+    window.localStorage.removeItem(GUEST_CREDENTIALS_KEY);
+  } catch (error) {
+    console.warn("Could not remove guest credentials:", error);
+  }
+};
+
+async function postAuth(endpoint, credentials) {
+  const response = await apiFetch(`${API}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(credentials),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  return { response, data };
+}
+
+async function ensureGuestSession() {
+  let credentials = readGuestCredentials();
+
+  // Reuse this browser's guest account after a session cookie expires.
+  if (credentials) {
+    const { response, data } = await postAuth("/api/login", credentials);
+    if (response.ok && data.success && data.user) {
+      return data.user;
+    }
+
+    // Only create a replacement account for invalid saved credentials.
+    if (response.status === 401 || response.status === 400) {
+      removeGuestCredentials();
+      credentials = null;
+    } else {
+      throw new Error(data.message || "Could not restore the guest session.");
+    }
+  }
+
+  credentials = makeGuestCredentials();
+  saveGuestCredentials(credentials);
+
+  const { response, data } = await postAuth("/api/register", credentials);
+  if (response.ok && data.success && data.user) {
+    return data.user;
+  }
+
+  // In the very unlikely event that the generated username already exists,
+  // try logging in with that same generated credential pair.
+  if (response.status === 409) {
+    const retry = await postAuth("/api/login", credentials);
+    if (retry.response.ok && retry.data.success && retry.data.user) {
+      return retry.data.user;
+    }
+  }
+
+  removeGuestCredentials();
+  throw new Error(data.message || "Could not create a guest session.");
+}
+
 function App() {
   // =========================================================
-  // LOGIN / AUTHENTICATION
+  // AUTOMATIC SESSION (NO LOGIN SCREEN)
   // =========================================================
 
   const [user, setUser] = useState(null);
   const [checkingLogin, setCheckingLogin] = useState(true);
+  const [backendMessage, setBackendMessage] = useState("");
 
-  const [authMode, setAuthMode] = useState("login");
-  const [authUsername, setAuthUsername] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authConfirmPassword, setAuthConfirmPassword] = useState("");
-  const [authLoading, setAuthLoading] = useState(false);
+  useEffect(() => {
+    checkLogin();
+  }, []);
+
+  const checkLogin = async () => {
+    try {
+      // Preserve an existing signed-in user if this browser already has a session.
+      try {
+        const response = await apiFetch(`${API}/api/me`);
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.success && data.user) {
+          setUser(data.user);
+          return;
+        }
+      } catch (error) {
+        // The server may be waking from sleep; guest setup below will also try it.
+        console.warn("Could not restore existing session:", error);
+      }
+
+      // No login form: create/restore a guest account silently so that the
+      // backend's login-protected task, schedule and habit APIs still work.
+      const guestUser = await ensureGuestSession();
+      setUser(guestUser);
+      setBackendMessage("");
+    } catch (error) {
+      console.error("Could not prepare a ChronoAI session:", error);
+      setBackendMessage(
+        "ChronoAI could not connect to the backend. The dashboard is visible, but saving data may not work until the connection is restored. Refresh to try again."
+      );
+    } finally {
+      setCheckingLogin(false);
+    }
+  };
 
   // =========================================================
   // TASKS
@@ -60,139 +192,7 @@ function App() {
   const [habitsSaved, setHabitsSaved] = useState(false);
 
   // =========================================================
-  // CHECK LOGIN SESSION
-  // =========================================================
-
-  useEffect(() => {
-    checkLogin();
-  }, []);
-
-  const checkLogin = async () => {
-    try {
-      const response = await apiFetch(`${API}/api/me`);
-      const data = await response.json();
-
-      if (data.success && data.user) {
-        setUser(data.user);
-      }
-    } catch (error) {
-      console.log("Could not check login:", error);
-    } finally {
-      setCheckingLogin(false);
-    }
-  };
-
-  // =========================================================
-  // LOGIN / REGISTER
-  // =========================================================
-
-  const handleAuthSubmit = async (event) => {
-    event.preventDefault();
-
-    const username = authUsername.trim();
-
-    if (!username || !authPassword) {
-      alert("Please enter username and password.");
-      return;
-    }
-
-    if (authMode === "register") {
-      if (username.length < 3) {
-        alert("Username must be at least 3 characters.");
-        return;
-      }
-
-      if (authPassword.length < 6) {
-        alert("Password must be at least 6 characters.");
-        return;
-      }
-
-      if (authPassword !== authConfirmPassword) {
-        alert("Passwords do not match.");
-        return;
-      }
-    }
-
-    setAuthLoading(true);
-
-    try {
-      const endpoint =
-        authMode === "login"
-          ? "/api/login"
-          : "/api/register";
-
-      const response = await apiFetch(
-        `${API}${endpoint}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            username,
-            password: authPassword,
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        alert(
-          data.message ||
-            (
-              authMode === "login"
-                ? "Invalid username or password."
-                : "Registration failed."
-            )
-        );
-        return;
-      }
-
-      setUser(data.user);
-
-      setAuthUsername("");
-      setAuthPassword("");
-      setAuthConfirmPassword("");
-    } catch (error) {
-      console.log("Authentication error:", error);
-
-      alert(
-        "Cannot connect to the backend. Please try again."
-      );
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  // =========================================================
-  // LOGOUT
-  // =========================================================
-
-  const handleLogout = async () => {
-    try {
-      await apiFetch(`${API}/api/logout`, {
-        method: "POST",
-      });
-    } catch (error) {
-      console.log("Logout error:", error);
-    }
-
-    setUser(null);
-
-    setTasks([]);
-    setSchedule([]);
-
-    setSleepTime("");
-    setWakeTime("");
-    setScreenTime("");
-    setStudyTime("");
-
-    setHabitsSaved(false);
-  };
-
-  // =========================================================
-  // LOAD USER DATA AFTER LOGIN
+  // LOAD USER DATA AFTER SESSION IS READY
   // =========================================================
 
   useEffect(() => {
@@ -956,295 +956,28 @@ function App() {
   }
 
   // =========================================================
-  // LOGIN / REGISTER SCREEN
-  // =========================================================
-
-  if (!user) {
-    return (
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "30px",
-          boxSizing: "border-box",
-          background:
-            "linear-gradient(135deg, #f7f4ff 0%, #f9fbff 100%)",
-        }}
-      >
-        <div
-          style={{
-            width: "100%",
-            maxWidth: "430px",
-            background: "#ffffff",
-            borderRadius: "24px",
-            padding: "38px",
-            boxSizing: "border-box",
-            boxShadow:
-              "0 20px 60px rgba(30, 20, 70, 0.12)",
-          }}
-        >
-          <div
-            style={{
-              textAlign: "center",
-              fontSize: "31px",
-              fontWeight: "800",
-              marginBottom: "24px",
-            }}
-          >
-            <span
-              style={{
-                color: "#6d3df5",
-              }}
-            >
-              ✦
-            </span>{" "}
-            Chrono
-            <span
-              style={{
-                color: "#6d3df5",
-              }}
-            >
-              AI
-            </span>
-          </div>
-
-          <h1
-            style={{
-              textAlign: "center",
-              margin: "0",
-              fontSize: "30px",
-            }}
-          >
-            {authMode === "login"
-              ? "Welcome back"
-              : "Create your account"}
-          </h1>
-
-          <p
-            style={{
-              textAlign: "center",
-              color: "#777",
-              lineHeight: "1.5",
-              margin:
-                "10px 0 28px",
-            }}
-          >
-            {authMode === "login"
-              ? "Sign in to continue to your productivity planner."
-              : "Create an account to keep your ChronoAI data private."}
-          </p>
-
-          <form
-            onSubmit={
-              handleAuthSubmit
-            }
-          >
-            <label
-              style={{
-                display: "block",
-                fontWeight: "600",
-                marginBottom: "8px",
-              }}
-            >
-              Username
-            </label>
-
-            <input
-              type="text"
-              placeholder="Enter username"
-              value={authUsername}
-              onChange={(e) =>
-                setAuthUsername(
-                  e.target.value
-                )
-              }
-              autoComplete="username"
-              style={{
-                width: "100%",
-                boxSizing:
-                  "border-box",
-                padding:
-                  "14px 15px",
-                marginBottom:
-                  "18px",
-                border:
-                  "1px solid #ddd",
-                borderRadius:
-                  "12px",
-                outline: "none",
-                fontSize: "15px",
-              }}
-            />
-
-            <label
-              style={{
-                display: "block",
-                fontWeight: "600",
-                marginBottom: "8px",
-              }}
-            >
-              Password
-            </label>
-
-            <input
-              type="password"
-              placeholder="Enter password"
-              value={authPassword}
-              onChange={(e) =>
-                setAuthPassword(
-                  e.target.value
-                )
-              }
-              autoComplete={
-                authMode === "login"
-                  ? "current-password"
-                  : "new-password"
-              }
-              style={{
-                width: "100%",
-                boxSizing:
-                  "border-box",
-                padding:
-                  "14px 15px",
-                marginBottom:
-                  authMode === "register"
-                    ? "18px"
-                    : "22px",
-                border:
-                  "1px solid #ddd",
-                borderRadius:
-                  "12px",
-                outline: "none",
-                fontSize: "15px",
-              }}
-            />
-
-            {authMode ===
-              "register" && (
-              <>
-                <label
-                  style={{
-                    display: "block",
-                    fontWeight: "600",
-                    marginBottom:
-                      "8px",
-                  }}
-                >
-                  Confirm Password
-                </label>
-
-                <input
-                  type="password"
-                  placeholder="Re-enter password"
-                  value={
-                    authConfirmPassword
-                  }
-                  onChange={(e) =>
-                    setAuthConfirmPassword(
-                      e.target.value
-                    )
-                  }
-                  autoComplete="new-password"
-                  style={{
-                    width: "100%",
-                    boxSizing:
-                      "border-box",
-                    padding:
-                      "14px 15px",
-                    marginBottom:
-                      "22px",
-                    border:
-                      "1px solid #ddd",
-                    borderRadius:
-                      "12px",
-                    outline: "none",
-                    fontSize: "15px",
-                  }}
-                />
-              </>
-            )}
-
-            <button
-              type="submit"
-              disabled={authLoading}
-              style={{
-                width: "100%",
-                border: "none",
-                borderRadius: "13px",
-                padding: "14px",
-                background:
-                  "linear-gradient(135deg, #6d3df5, #8b5cf6)",
-                color: "#fff",
-                fontSize: "16px",
-                fontWeight: "700",
-                cursor: authLoading
-                  ? "not-allowed"
-                  : "pointer",
-                opacity: authLoading
-                  ? 0.65
-                  : 1,
-              }}
-            >
-              {authLoading
-                ? "Please wait..."
-                : authMode === "login"
-                  ? "Login"
-                  : "Create Account"}
-            </button>
-          </form>
-
-          <div
-            style={{
-              textAlign: "center",
-              marginTop: "22px",
-              color: "#777",
-              fontSize: "14px",
-            }}
-          >
-            {authMode === "login"
-              ? "New user? "
-              : "Already have an account? "}
-
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode(
-                  authMode === "login"
-                    ? "register"
-                    : "login"
-                );
-
-                setAuthPassword("");
-
-                setAuthConfirmPassword("");
-              }}
-              style={{
-                border: "none",
-                background: "none",
-                color: "#6d3df5",
-                fontWeight: "700",
-                cursor: "pointer",
-                padding: "0",
-              }}
-            >
-              {authMode === "login"
-                ? "Create an account"
-                : "Login"}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // =========================================================
   // MAIN DASHBOARD
   // =========================================================
 
   return (
     <div className="app">
+
+      {backendMessage && (
+        <div
+          role="alert"
+          style={{
+            margin: "12px 20px 0",
+            padding: "12px 16px",
+            borderRadius: "10px",
+            background: "#fff4e5",
+            color: "#8a4b08",
+            border: "1px solid #ffd7a3",
+            fontSize: "14px",
+          }}
+        >
+          {backendMessage}
+        </div>
+      )}
 
       {/* ================================================= */}
       {/* NAVBAR */}
@@ -1304,10 +1037,9 @@ function App() {
               "User"
             }
           >
-            {(user?.username ||
-              "U")
+            (user?.username || "Guest")
               .charAt(0)
-              .toUpperCase()}
+              .toUpperCase()
           </div>
 
           <span
@@ -1317,28 +1049,9 @@ function App() {
               color: "#333",
             }}
           >
-            {user?.username}
+            {user?.username || "Guest"}
           </span>
 
-          <button
-            onClick={
-              handleLogout
-            }
-            style={{
-              border: "none",
-              borderRadius: "9px",
-              padding:
-                "8px 12px",
-              background:
-                "#f1eff8",
-              cursor:
-                "pointer",
-              fontWeight: "600",
-              color: "#333",
-            }}
-          >
-            Logout
-          </button>
 
         </div>
 

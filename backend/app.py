@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, session
@@ -31,6 +32,11 @@ SECRET_KEY = os.environ.get(
 
 app.secret_key = SECRET_KEY
 
+if os.environ.get("RENDER", "").lower() == "true" and SECRET_KEY == "chronoai-dev-secret-change-me":
+    app.logger.warning(
+        "SECRET_KEY is using the development fallback. Set a private SECRET_KEY in Render."
+    )
+
 
 # ==================================================
 # FRONTEND URL
@@ -46,25 +52,39 @@ FRONTEND_URL = os.environ.get(
 # PRODUCTION
 # ==================================================
 
-PRODUCTION = (
-    os.environ.get("PRODUCTION", "false").lower() == "true"
-)
+# Render deployments should use secure cross-site cookies by default.
+# You can explicitly override this with PRODUCTION=true/false in Render.
+production_default = "true" if os.environ.get("RENDER", "").lower() == "true" else "false"
+PRODUCTION = os.environ.get("PRODUCTION", production_default).lower() == "true"
 
 
 # ==================================================
 # CORS
 # ==================================================
 
+# Keep the stable production alias and allow this project's unique Vercel
+# deployment URLs too (for example: chronoai-<deployment>-prem-f4e7.vercel.app).
+# The pattern is restricted to HTTPS origins whose Vercel hostname starts with
+# "chronoai", rather than allowing every *.vercel.app site.
+vercel_chronoai_origin = re.compile(
+    r"^https://chronoai(?:-[a-z0-9-]+)?\.vercel\.app$",
+    re.IGNORECASE
+)
+
 allowed_origins = [
     FRONTEND_URL,
     "https://chronoai-orcin.vercel.app",
     "https://chronoai-atf468m0i-prem-f4e7.vercel.app",
+    "https://chronoai-2zouz15jz-prem-f4e7.vercel.app",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    vercel_chronoai_origin,
 ]
 
-# Remove duplicate origins
-allowed_origins = list(set(allowed_origins))
+# Remove duplicate string origins while retaining the compiled regex.
+allowed_origins = list(dict.fromkeys(
+    origin for origin in allowed_origins if isinstance(origin, str)
+)) + [vercel_chronoai_origin]
 
 
 CORS(
